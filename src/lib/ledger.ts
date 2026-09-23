@@ -54,7 +54,8 @@ export function summarize(entries: LedgerEntry[]): Summary {
   let points = 0
   let exp = 0
   // 两遍扫描：先收集「券已被消费」的兑换 id —— 与流水读取顺序无关。
-  // 消费 = use/recycle 引用；或 adjust 全额冲正了一条 redeem_voucher（积分已退回，券作废）。
+  // 消费 = use/recycle 引用；adjust 全额冲正 redeem_voucher → 券作废（加入消费）；
+  // adjust 全额冲正 use/recycle 记录 → 撤销消费，券回到背包（从消费集中移除）。
   // 口径必须与 scripts/ledger.mjs 的 summarize 一致。
   const consumedRefs = new Set<string>()
   for (const e of entries) {
@@ -65,6 +66,13 @@ export function summarize(entries: LedgerEntry[]): Summary {
     if (e.type === 'adjust' && e.ref) {
       const orig = entries.find((x) => x.id === e.ref)
       if (orig?.type === 'redeem_voucher' && e.points === -orig.points) consumedRefs.add(orig.id)
+    }
+  }
+  for (const e of entries) {
+    if (e.type === 'adjust' && e.ref) {
+      const orig = entries.find((x) => x.id === e.ref)
+      if ((orig?.type === 'use_voucher' || orig?.type === 'recycle_voucher') && e.points === -orig.points && e.exp === -orig.exp)
+        consumedRefs.delete(orig.ref)
     }
   }
   const backpack: LedgerEntry[] = []

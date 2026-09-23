@@ -82,8 +82,9 @@ function writeEntry(dataDir, entry) {
 function readLedgerEx(dataDir) {
   const entries = []
   const bad = []
+  const invalid = []
   const ledgerDir = join(dataDir, 'ledger')
-  if (!existsSync(ledgerDir)) return { entries, bad }
+  if (!existsSync(ledgerDir)) return { entries, bad, invalid }
   const walk = (dir, rel) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name)
@@ -91,29 +92,40 @@ function readLedgerEx(dataDir) {
       if (statSync(full).isDirectory()) {
         walk(full, relName)
       } else if (name.endsWith('.json') && !name.endsWith('.tmp')) {
-        try { entries.push(JSON.parse(readFileSync(full, 'utf8'))) }
-        catch (e) { bad.push(`ledger/${relName}: ${e.message}`) }
+        try {
+          const e = JSON.parse(readFileSync(full, 'utf8'))
+          entries.push(e)
+          // 字段级校验：缺 exp 会让等级变 NaN，字符串 points 会让余额拼错
+          for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
+            if (e[k] === undefined) invalid.push(`ledger/${relName}: 缺少字段 ${k}`)
+          if (!Number.isFinite(e.points) || !Number.isFinite(e.exp))
+            invalid.push(`ledger/${relName}: points/exp 不是有限数字（${JSON.stringify([e.points, e.exp])}）`)
+          if (e.type && !VALID_TYPES.has(e.type)) invalid.push(`ledger/${relName}: 未知类型 ${e.type}`)
+          if (e.time && Number.isNaN(Date.parse(e.time))) invalid.push(`ledger/${relName}: time 不是合法时间`)
+        } catch (err) { bad.push(`ledger/${relName}: ${err.message}`) }
       }
     }
   }
   walk(ledgerDir, '')
-  return { entries, bad }
+  return { entries, bad, invalid }
 }
 
-/** 普通读取：坏文件告警后跳过（list / summary / doctor 可用） */
+/** 普通读取：坏文件/坏字段告警后跳过（list / summary / doctor 可用） */
 function readLedger(dataDir) {
-  const { entries, bad } = readLedgerEx(dataDir)
+  const { entries, bad, invalid } = readLedgerEx(dataDir)
   for (const b of bad) console.error(`⚠ 跳过坏文件 ${b}`)
+  for (const v of invalid) console.error(`⚠ 跳过异常流水 ${v}`)
   return entries
 }
 
-/** 严格读取：任何坏文件都拒绝——写账前账本必须完整可读 */
+/** 严格读取：任何坏文件或字段异常都拒绝——写账前账本必须完整可信 */
 function readLedgerStrict(dataDir) {
-  const { entries, bad } = readLedgerEx(dataDir)
-  if (bad.length > 0) {
-    console.error('账本中存在无法解析的流水文件，拒绝写账（防止在坏数据上继续叠加）：')
+  const { entries, bad, invalid } = readLedgerEx(dataDir)
+  if (bad.length > 0 || invalid.length > 0) {
+    console.error('账本中存在无法解析或字段异常的流水，拒绝写账（防止在坏数据上继续叠加）：')
     for (const b of bad) console.error(`  ⚠ ${b}`)
-    fail(`共 ${bad.length} 个坏文件，先修复或移走它们（可用 doctor 查看），再重试`)
+    for (const v of invalid) console.error(`  ⚠ ${v}`)
+    fail(`共 ${bad.length + invalid.length} 个问题，先修复或移走它们（可用 doctor 查看），再重试`)
   }
   return entries
 }
@@ -130,7 +142,8 @@ const VALID_TYPES = new Set(['earn', 'redeem_physical', 'redeem_voucher', 'use_v
 function summarize(entries) {
   let points = 0, exp = 0
   // 两遍扫描：先收集「券已被消费」的兑换 id —— 与流水读取顺序无关。
-  // 消费 = use/recycle 引用；或 adjust 全额冲正了一条 redeem_voucher（积分已退回，券作废）。
+  // 消费 = use/recycle 引用；adjust 全额冲正 redeem_voucher → 券作废（加入消费）；
+  // adjust 全额冲正 use/recycle 记录 → 撤销消费，券回到背包（从消费集中移除）。
   const consumedRefs = new Set()
   for (const e of entries) {
     if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
@@ -140,6 +153,13 @@ function summarize(entries) {
     if (e.type === 'adjust' && e.ref) {
       const orig = entries.find((x) => x.id === e.ref)
       if (orig?.type === 'redeem_voucher' && e.points === -orig.points) consumedRefs.add(orig.id)
+    }
+  }
+  for (const e of entries) {
+    if (e.type === 'adjust' && e.ref) {
+      const orig = entries.find((x) => x.id === e.ref)
+      if ((orig?.type === 'use_voucher' || orig?.type === 'recycle_voucher') && e.points === -orig.points && e.exp === -orig.exp)
+        consumedRefs.delete(orig.ref)
     }
   }
   const backpack = entries.filter((e) => e.type === 'redeem_voucher' && !consumedRefs.has(e.id))
@@ -234,6 +254,11 @@ switch (cmd) {
     if (!Number.isFinite(dPoints) || !Number.isFinite(dExp)) fail('--points / --exp 必须是数字')
     if (fullReverse && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
       fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
+    // 按累计冲正金额防重：不论显式差额还是全额，累计冲正已达原记录全额的，不再接受继续冲正
+    const adjSum = entries.reduce((s, x) => (x.type === 'adjust' && x.ref === orig.id ? { p: s.p + x.points, e: s.e + x.exp } : s), { p: 0, e: 0 })
+    const fullyOffsetBefore = adjSum.p === -orig.points && adjSum.e === -orig.exp
+    if (fullyOffsetBefore)
+      fail(`记录 ${orig.id} 的累计冲正已覆盖全额（已冲 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验），不能再冲正（会超冲）；如需再改，请对新产生的 adjust 记录操作`)
     if (orig.type === 'redeem_voucher') {
       const consumed = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === orig.id)
       if (consumed && dPoints > 0)
@@ -434,6 +459,11 @@ switch (cmd) {
         .filter((x) => x.v >= 0.2)
       if (significant.length > 1 && Math.max(...significant.map((x) => x.idx)) - Math.min(...significant.map((x) => x.idx)) >= 2)
         console.log('   ⚠ 注意：概率散布在不相邻档位上，Jev 对工作量拿不准，插值仅供参考——建议按上下文重判或问用户')
+      if (eff.confidence < 0.6)
+        console.log(`   ⚠ 注意：工作量判断置信度仅 ${(eff.confidence * 100).toFixed(0)}%（<60%），插值仅供参考——建议重判或问用户`)
+      const choiceIdx = tiers.indexOf(Number(a.choice))
+      if (choiceIdx >= 0 && Math.abs(choiceIdx - eff.score) >= 1)
+        console.log(`   ⚠ 注意：选档（${a.choice} 分）与工作量位置（第 ${eff.score.toFixed(1)} 档）相差 ≥1 档，两项判断冲突——建议重判或问用户`)
       ok(`Jev 综合建议：${interpolated} 分（选档 ${a.choice} + 位置插值）`)
     } else {
       ok(`Jev 建议：${a.choice} 分`)
