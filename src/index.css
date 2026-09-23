@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #fdfbf7;
+  --color-ink: #2d2d2d;
+  --color-muted: #e5e0d8;
+  --color-accent: #ff4d4d;
+  --color-pen: #2d5da1;
+  --color-postit: #fff9c4;
+
+  --font-hand: "Patrick Hand", "LXGW WenKai", "霞鹜文楷", cursive;
+  --font-marker: "Kalam", "LXGW WenKai", "霞鹜文楷", cursive;
+  --font-wenkai: "LXGW WenKai", "霞鹜文楷", "Kalam", cursive;
+}
+
+html {
+  font-family: var(--font-hand);
+}
+
+body {
+  color: var(--color-ink);
+  background-color: var(--color-paper);
+  background-image: radial-gradient(#e5e0d8 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-marker);
+}
+
+/* wobbly 歪边框 —— 全站禁用常规圆角 */
+.wobbly {
+  border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+}
+.wobbly-md {
+  border-radius: 55px 15px 45px 15px / 15px 45px 15px 55px;
+}
+.wobbly-sm {
+  border-radius: 25px 10px 20px 10px / 10px 20px 10px 25px;
+}
+.wobbly-blob {
+  border-radius: 60% 40% 55% 45% / 45% 55% 40% 60%;
+}
+
+/* 硬偏移阴影 */
+.shadow-hard {
+  box-shadow: 4px 4px 0px 0px var(--color-ink);
+}
+.shadow-hard-sm {
+  box-shadow: 3px 3px 0px 0px rgba(45, 45, 45, 0.12);
+}
+.shadow-hard-lg {
+  box-shadow: 8px 8px 0px 0px var(--color-ink);
+}
+
+/* 手绘按压交互：hover 收影子，active 按平 */
+.pressable {
+  transition: transform 100ms ease, box-shadow 100ms ease, background-color 100ms ease;
+}
+.pressable:hover {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0px 0px var(--color-ink);
+}
+.pressable:active {
+  transform: translate(4px, 4px);
+  box-shadow: 0px 0px 0px 0px var(--color-ink);
+}
+
+/* 轻微浮动动画（装饰元素） */
+@keyframes bob {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-8px) rotate(3deg); }
+}
+.bob {
+  animation: bob 3s ease-in-out infinite;
+}
+
+/* 波浪下划线 */
+.wavy-underline {
+  text-decoration: underline wavy var(--color-accent) 2px;
+  text-underline-offset: 5px;
+}
+
+/* 胶带 */
+.tape {
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  width: 96px;
+  height: 26px;
+  transform: translateX(-50%) rotate(-3deg);
+  background: rgba(180, 175, 160, 0.45);
+  border-left: 1px dashed rgba(45, 45, 45, 0.25);
+  border-right: 1px dashed rgba(45, 45, 45, 0.25);
+}
+
+/* 图钉 */
+.tack {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: 2px solid var(--color-ink);
+  box-shadow: inset -2px -2px 0 rgba(0, 0, 0, 0.2), 1px 2px 0 rgba(45, 45, 45, 0.4);
+}
+
+/* 进度条手绘填充 */
+.progress-track {
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 6px,
+    rgba(45, 45, 45, 0.05) 6px,
+    rgba(45, 45, 45, 0.05) 8px
+  );
+}

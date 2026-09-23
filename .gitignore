@@ -1,0 +1,13 @@
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+
+# 本地配置（含数据目录路径，不入 git）
+config.local.json
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
