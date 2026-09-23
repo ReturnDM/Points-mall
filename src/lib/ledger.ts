@@ -71,7 +71,7 @@ export function summarize(entries: LedgerEntry[]): Summary {
   for (const e of entries) {
     if (e.type === 'adjust' && e.ref) {
       const orig = entries.find((x) => x.id === e.ref)
-      if ((orig?.type === 'use_voucher' || orig?.type === 'recycle_voucher') && e.points === -orig.points && e.exp === -orig.exp)
+      if (orig?.ref && (orig?.type === 'use_voucher' || orig?.type === 'recycle_voucher') && e.points === -orig.points && e.exp === -orig.exp)
         consumedRefs.delete(orig.ref)
     }
   }
