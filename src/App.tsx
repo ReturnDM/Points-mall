@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { FolderOpen, RefreshCw, Coins, Star, Package, PencilRuler } from 'lucide-react'
-import type { DataBundle } from './lib/types'
+import { FolderOpen, RefreshCw, Coins, Star, Package, PencilRuler, AlertTriangle } from 'lucide-react'
+import type { DataBundle, LedgerEntry, ShopItem } from './lib/types'
 import { readBundle, loadDirHandle, saveDirHandle, ensurePermission, fsAccessSupported } from './lib/fsdata'
-import { summarize, sortEntries, recycleValue } from './lib/ledger'
+import { summarize, sortEntries, recycleValue, yuanToPoints } from './lib/ledger'
 import { loadDemoBundle } from './lib/demo'
-import type { LedgerEntry, ShopItem } from './lib/types'
 import { Card, WobblyButton, StickyTag, SectionTitle } from './ui'
 
 export default function App() {
@@ -17,7 +16,6 @@ export default function App() {
 
   const load = useCallback(async (dir: unknown) => {
     setDirRef(dir)
-    setStatus('loading')
     try {
       const data = await readBundle(dir)
       setBundle(data)
@@ -54,6 +52,18 @@ export default function App() {
     })()
   }, [load])
 
+  // 自动刷新：窗口重新获得焦点时，以及每 60 秒兜底轮询一次
+  useEffect(() => {
+    if (!dirRef) return
+    const onFocus = () => load(dirRef)
+    window.addEventListener('focus', onFocus)
+    const timer = window.setInterval(onFocus, 60_000)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.clearInterval(timer)
+    }
+  }, [dirRef, load])
+
   const summary = bundle ? summarize(bundle.entries) : null
 
   return (
@@ -69,22 +79,26 @@ export default function App() {
       )}
       {status === 'ready' && bundle && summary && (
         <main className="space-y-16">
-          <Dashboard points={summary.points} exp={summary.exp} level={summary.level} backpackCount={summary.backpack.length} />
-          <Tasks pricing={bundle.pricing} />
-          <Shop shop={bundle.shop} points={summary.points} />
-          <Backpack backpack={summary.backpack} />
-          <LedgerList entries={sortEntries(bundle.entries)} />
-          {bundle.warnings.length > 0 && (
-            <Card className="p-4 border-dashed text-sm opacity-70">
-              {bundle.warnings.map((w, i) => (
-                <p key={i}>⚠ {w}</p>
-              ))}
+          <TrustBanner bundle={bundle} onPick={pick} />
+          {bundle.entries.length === 0 ? (
+            <Card className="p-8 text-center border-dashed">
+              <AlertTriangle className="mx-auto mb-3 text-accent" size={40} strokeWidth={2.5} />
+              <p className="text-xl">没有读到任何流水 —— 下方的余额 / 等级不可信</p>
+              <p className="mt-2 opacity-60">可能是选错了目录，或账本还没有第一笔记录。检查目录名或重新选择。</p>
             </Card>
+          ) : (
+            <>
+              <Dashboard points={summary.points} exp={summary.exp} level={summary.level} backpackCount={summary.backpack.length} rate={bundle.rate} />
+              <Tasks pricing={bundle.pricing} />
+              <Shop shop={bundle.shop} points={summary.points} rate={bundle.rate} />
+              <Backpack backpack={summary.backpack} />
+              <LedgerList entries={sortEntries(bundle.entries)} />
+            </>
           )}
         </main>
       )}
       <footer className="mt-20 text-center text-sm opacity-50 border-t-2 border-dashed border-ink/30 pt-6">
-        纯静态只读前端 · 写入请找 Agent · 坚果云同步数据目录
+        纯静态只读前端 · 写入请找 Agent（CLI）· 坚果云同步数据目录
       </footer>
     </div>
   )
@@ -115,6 +129,30 @@ function Header({ onPick, onReload, hasData, pickSupported }: { onPick: () => vo
   )
 }
 
+/** 可信度横幅：数据目录名 + 读取时间 + 警告，置于总览上方 */
+function TrustBanner({ bundle, onPick }: { bundle: DataBundle; onPick: () => void }) {
+  const readTime = new Date(bundle.readAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const hasCritical = bundle.entries.length === 0
+  return (
+    <div className={`border-2 border-dashed ${hasCritical ? 'border-accent text-accent' : 'border-ink/30'} wobbly-sm px-4 py-2 text-sm flex flex-wrap items-center gap-x-4 gap-y-1`}>
+      <span>📂 {bundle.dirName ?? '已授权目录'}</span>
+      <span className="opacity-60">读取于 {readTime} · 切回页面会自动刷新</span>
+      {bundle.warnings.length > 0 && (
+        <span className="basis-full">
+          {bundle.warnings.map((w, i) => (
+            <span key={i} className="block">⚠ {w}</span>
+          ))}
+        </span>
+      )}
+      {hasCritical && (
+        <WobblyButton variant="secondary" className="!h-9 !px-4 text-sm" onClick={onPick}>
+          重新选择目录
+        </WobblyButton>
+      )}
+    </div>
+  )
+}
+
 function Welcome({ onPick, pickSupported }: { onPick: () => void; pickSupported: boolean }) {
   return (
     <Card decoration="tape" className="p-8 md:p-10 text-center rotate-1">
@@ -132,7 +170,7 @@ function Welcome({ onPick, pickSupported }: { onPick: () => void; pickSupported:
   )
 }
 
-function Dashboard({ points, exp, level, backpackCount }: { points: number; exp: number; level: { level: number; expInLevel: number; expToNext: number; expRequired: number }; backpackCount: number }) {
+function Dashboard({ points, exp, level, backpackCount, rate }: { points: number; exp: number; level: { level: number; expInLevel: number; expToNext: number; expRequired: number }; backpackCount: number; rate: number }) {
   const pct = Math.min(100, Math.round((level.expInLevel / level.expRequired) * 100))
   return (
     <section aria-label="总览">
@@ -141,7 +179,7 @@ function Dashboard({ points, exp, level, backpackCount }: { points: number; exp:
           <Coins className="mx-auto mb-2" size={32} strokeWidth={2.5} />
           <p className="text-sm opacity-60">当前积分</p>
           <p className="text-5xl font-bold text-accent">{points}</p>
-          <p className="mt-1 text-sm opacity-60">≈ ¥{(points / 20).toFixed(1)}（20 分 = 1 元）</p>
+          <p className="mt-1 text-sm opacity-60">≈ ¥{(points / rate).toFixed(1)}（{rate} 分 = 1 元）</p>
         </Card>
         <Card className="p-6 md:rotate-1" style={{ background: '#fff' }}>
           <Star className="mx-auto mb-2" size={32} strokeWidth={2.5} />
@@ -200,17 +238,16 @@ function Tasks({ pricing }: { pricing: { tiers: number[]; tasks: { id: string; n
   )
 }
 
-function Shop({ shop, points }: { shop: ShopItem[]; points: number }) {
-  const yuanToPoints = (y: number) => Math.ceil(y * 20)
+function Shop({ shop, points, rate }: { shop: ShopItem[]; points: number; rate: number }) {
   return (
     <section aria-label="商城">
-      <SectionTitle sub="双轨定价：实物 20 分 = 1 元，虚拟券独立定价">商城</SectionTitle>
+      <SectionTitle sub={`双轨定价：实物 ${rate} 分 = 1 元，虚拟券独立定价`}>商城</SectionTitle>
       {shop.length === 0 ? (
         <Card className="p-6 text-center opacity-60">数据目录里还没有 shop.json，商品清单由 Agent 添加</Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
           {shop.map((item, i) => {
-            const price = item.type === 'voucher' ? (item.points ?? 0) : yuanToPoints(item.yuan ?? 0)
+            const price = item.type === 'voucher' ? (item.points ?? 0) : yuanToPoints(item.yuan ?? 0, rate)
             const affordable = points >= price
             return (
               <Card
@@ -225,7 +262,7 @@ function Shop({ shop, points }: { shop: ShopItem[]; points: number }) {
                 <div className="mt-4 flex items-center justify-between">
                   <span className="text-2xl font-bold text-accent">{price} 分</span>
                   {item.type === 'physical' && item.yuan != null && (
-                    <span className="text-xs opacity-50">¥{item.yuan} × 20</span>
+                    <span className="text-xs opacity-50">¥{item.yuan} × {rate}</span>
                   )}
                 </div>
                 {!affordable && <p className="mt-2 text-sm text-pen">还差 {price - points} 分</p>}
@@ -272,6 +309,15 @@ function Backpack({ backpack }: { backpack: LedgerEntry[] }) {
 }
 
 function LedgerList({ entries }: { entries: LedgerEntry[] }) {
+  const [showAll, setShowAll] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const toggle = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   const typeLabel: Record<string, { text: string; cls: string }> = {
     earn: { text: '获得', cls: 'text-accent' },
     redeem_physical: { text: '兑换实物', cls: 'text-pen' },
@@ -280,6 +326,7 @@ function LedgerList({ entries }: { entries: LedgerEntry[] }) {
     recycle_voucher: { text: '回收', cls: 'text-accent' },
     adjust: { text: '更正', cls: 'opacity-60' },
   }
+  const shown = showAll ? entries : entries.slice(0, 50)
   return (
     <section aria-label="流水">
       <SectionTitle sub="余额与等级均由流水汇总，改账不覆盖历史">流水账本</SectionTitle>
@@ -287,16 +334,24 @@ function LedgerList({ entries }: { entries: LedgerEntry[] }) {
         <Card className="p-6 text-center opacity-60">还没有流水 —— 跟 Agent 说一句「刷了牙」试试</Card>
       ) : (
         <Card className="divide-y-2 divide-dashed divide-ink/20">
-          {entries.slice(0, 50).map((e) => {
+          {shown.map((e) => {
             const t = typeLabel[e.type] ?? { text: e.type, cls: '' }
+            const hasDetail = !!(e.note || e.ref)
+            const open = expanded.has(e.id)
             return (
-              <div key={e.id} className="flex items-center justify-between px-5 py-3 gap-4">
+              <div
+                key={e.id}
+                className={`flex items-start justify-between px-5 py-3 gap-4 ${hasDetail ? 'cursor-pointer hover:bg-muted/30' : ''}`}
+                onClick={hasDetail ? () => toggle(e.id) : undefined}
+              >
                 <div className="min-w-0">
-                  <p className="truncate">
+                  <p className={open ? '' : 'truncate'}>
                     <span className={`text-sm mr-2 ${t.cls}`}>[{t.text}]</span>
                     {e.title}
                   </p>
-                  {e.note && <p className="text-sm opacity-50 truncate">✎ {e.note}</p>}
+                  {e.note && <p className={`text-sm opacity-50 ${open ? '' : 'truncate'}`}>✎ {e.note}</p>}
+                  {open && e.ref && <p className="text-xs opacity-40 mt-0.5">↳ 关联记录：{e.ref}</p>}
+                  {hasDetail && <p className="text-xs opacity-30 mt-0.5">{open ? '▲ 收起' : '▼ 展开详情'}</p>}
                 </div>
                 <div className="text-right shrink-0">
                   <p className={`font-bold ${e.points > 0 ? 'text-accent' : e.points < 0 ? 'text-pen' : 'opacity-60'}`}>
@@ -310,7 +365,20 @@ function LedgerList({ entries }: { entries: LedgerEntry[] }) {
               </div>
             )
           })}
-          {entries.length > 50 && <p className="px-5 py-3 text-sm opacity-50">仅显示最近 50 条，共 {entries.length} 条</p>}
+          {entries.length > 50 && (
+            <div className="px-5 py-3 text-center">
+              <button
+                type="button"
+                className="text-sm text-pen underline underline-offset-4 cursor-pointer"
+                onClick={(ev) => {
+                  ev.stopPropagation()
+                  setShowAll(true)
+                }}
+              >
+                查看全部 {entries.length} 条
+              </button>
+            </div>
+          )}
         </Card>
       )}
     </section>

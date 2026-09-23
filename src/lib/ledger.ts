@@ -37,12 +37,12 @@ export interface Summary {
   backpack: LedgerEntry[]
 }
 
-/** 实物汇率：首月试行 20 积分 = 1 元 */
-export const PHYSICAL_RATE = 20
+/** 实物默认汇率：首月试行 20 积分 = 1 元（可被数据目录 config.json 的 physicalRate 覆盖） */
+export const DEFAULT_RATE = 20
 
 /** 实物标价：人民币 × 汇率，向上取整 */
-export function yuanToPoints(yuan: number): number {
-  return Math.ceil(yuan * PHYSICAL_RATE)
+export function yuanToPoints(yuan: number, rate: number = DEFAULT_RATE): number {
+  return Math.ceil(yuan * rate)
 }
 
 /** 回收返还：原实付积分 × 80%，向下取整 */

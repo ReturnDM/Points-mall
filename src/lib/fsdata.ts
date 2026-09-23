@@ -84,27 +84,44 @@ export async function readBundle(dir: DirHandle): Promise<DataBundle> {
   const warnings: string[] = []
   let shop: ShopItem[] = []
   let pricing: TaskPricing | null = null
+  let rate = 20
   const entries: LedgerEntry[] = []
 
-  for (const name of ['shop.json', 'tasks.json']) {
+  for (const name of ['shop.json', 'tasks.json', 'config.json']) {
     try {
       const fh = await dir.getFileHandle(name)
       const data = await readJson(await fh.getFile())
       if (name === 'shop.json') shop = Array.isArray(data) ? (data as ShopItem[]) : (((data as { items?: ShopItem[] })?.items) ?? [])
-      else pricing = data as TaskPricing
+      else if (name === 'tasks.json') pricing = data as TaskPricing
+      else {
+        const r = (data as { physicalRate?: number })?.physicalRate
+        if (Number.isFinite(r) && (r as number) > 0) rate = r as number
+      }
     } catch {
-      warnings.push(`缺少或无法读取 ${name}`)
+      if (name !== 'config.json') warnings.push(`缺少或无法读取 ${name}`)
     }
   }
 
+  let ledgerMissing = false
   try {
     const ledgerDir = await dir.getDirectoryHandle('ledger')
     entries.push(...(await collectLedger(ledgerDir, warnings)))
   } catch {
+    ledgerMissing = true
     warnings.push('缺少 ledger/ 目录（还没有任何记账）')
   }
 
-  return { entries, shop, pricing, warnings }
+  return {
+    entries,
+    shop,
+    pricing,
+    rate,
+    readAt: new Date().toISOString(),
+    dirName: typeof dir.name === 'string' ? dir.name : undefined,
+    warnings: ledgerMissing && entries.length === 0
+      ? ['⚠ 未读到任何流水：可能选错了目录，或账本还没有第一笔记录。下方余额不可信。', ...warnings]
+      : warnings,
+  }
 }
 
 export function fsAccessSupported(): boolean {

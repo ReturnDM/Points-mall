@@ -8,17 +8,18 @@
  *   node scripts/ledger.mjs list [--limit 20] [--type earn]
  *   node scripts/ledger.mjs earn <title> <points> [--note "..."]
  *   node scripts/ledger.mjs adjust --ref <id> [--points Δ] [--exp Δ] [--title "..."] [--note "..."]
- *                                        # 不带 Δ 则全额冲正原记录
- *   node scripts/ledger.mjs redeem <itemId> [--note "..."]   # 实物/虚拟券兑换（查 shop.json 定价）
+ *                                        # 不带 Δ 则全额冲正（每条记录只能全额冲正一次）
+ *   node scripts/ledger.mjs redeem <itemId> [--note "..."]   # 兑换（查 shop.json 定价，余额不足拒绝）
  *   node scripts/ledger.mjs use <redeemId> [--note "..."]    # 核销虚拟券
  *   node scripts/ledger.mjs recycle <redeemId> [--note "..."] # 回收（返还原实付 80%）
+ *   node scripts/ledger.mjs doctor                       # 账本自检：坏流水/重复id/无效ref/重复核销
  */
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
-const PHYSICAL_RATE = 20
+const DEFAULT_RATE = 20
 
 // ---------- 数据目录解析：POINTS_DATA_DIR > config.local.json ----------
 function resolveDataDir() {
@@ -33,17 +34,26 @@ function resolveDataDir() {
   fail('未配置数据目录：设置 POINTS_DATA_DIR 或创建 config.local.json（{ "dataDir": "..." }）')
 }
 
+/** 实物汇率：数据目录 config.json 的 physicalRate > 默认 20 */
+function readRate(dataDir) {
+  try {
+    const cfg = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'))
+    if (Number.isFinite(cfg.physicalRate) && cfg.physicalRate > 0) return cfg.physicalRate
+  } catch { /* 无 config.json 用默认值 */ }
+  return DEFAULT_RATE
+}
+
 // ---------- 基础设施 ----------
 function fail(msg, code = 1) { console.error('❌ ' + msg); process.exit(code) }
 function ok(msg) { console.log('✅ ' + msg) }
 
-function genId(now) {
-  const rand = Array.from({ length: 4 }, () => 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)]).join('')
-  return `${fmtLocal(now)}-${rand}`
-}
 function fmtLocal(d) {
   const p = (n, w = 2) => String(n).padStart(w, '0')
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+function genId(now) {
+  const rand = Array.from({ length: 4 }, () => 'abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)]).join('')
+  return `${fmtLocal(now)}-${rand}`
 }
 function isoTime(d) {
   const off = -d.getTimezoneOffset()
@@ -56,8 +66,7 @@ function isoTime(d) {
 function writeEntry(dataDir, entry) {
   for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
     if (entry[k] === undefined) fail(`记录缺少必填字段 ${k}（内部错误）`)
-  const month = entry.time.slice(0, 7).replace('-', '-')
-  const dir = join(dataDir, 'ledger', month)
+  const dir = join(dataDir, 'ledger', entry.time.slice(0, 7))
   mkdirSync(dir, { recursive: true })
   const final = join(dir, entry.id + '.json')
   if (existsSync(final)) fail(`记录 id 已存在：${entry.id}`)
@@ -95,20 +104,31 @@ function levelFromExp(exp) {
   while (rest >= need) { rest -= need; lv++; need = EXP_FOR(lv) }
   return { level: lv, expInLevel: rest, expToNext: need - rest, expRequired: need }
 }
+const VALID_TYPES = new Set(['earn', 'redeem_physical', 'redeem_voucher', 'use_voucher', 'recycle_voucher', 'adjust'])
+
 function summarize(entries) {
   let points = 0, exp = 0
-  // 两遍扫描：先收集被核销/回收的兑换 id，再收集背包 —— 与流水读取顺序无关
+  // 两遍扫描：先收集「券已被消费」的兑换 id —— 与流水读取顺序无关。
+  // 消费 = use/recycle 引用；或 adjust 全额冲正了一条 redeem_voucher（积分已退回，券作废）。
   const consumedRefs = new Set()
   for (const e of entries) {
-    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) consumedRefs.add(e.ref)
+    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
+      consumedRefs.add(e.ref)
+      continue
+    }
+    if (e.type === 'adjust' && e.ref) {
+      const orig = entries.find((x) => x.id === e.ref)
+      if (orig?.type === 'redeem_voucher' && e.points === -orig.points) consumedRefs.add(orig.id)
+    }
   }
   const backpack = entries.filter((e) => e.type === 'redeem_voucher' && !consumedRefs.has(e.id))
   for (const e of entries) { points += e.points; exp += e.exp }
   return { points, exp, level: levelFromExp(exp), backpack }
 }
 function reportSummary(entries) {
+  const rate = readRate(globalThis.__dataDir)
   const s = summarize(entries)
-  ok(`余额 ${s.points} 分 ≈ ¥${(s.points / PHYSICAL_RATE).toFixed(2)} ｜ Lv.${s.level.level}（${s.level.expInLevel}/${s.level.expRequired}，还差 ${s.level.expToNext} 经验升级）｜ 累计经验 ${s.exp} ｜ 背包 ${s.backpack.length} 张券`)
+  ok(`余额 ${s.points} 分 ≈ ¥${(s.points / rate).toFixed(2)}（${rate} 分 = 1 元）｜ Lv.${s.level.level}（${s.level.expInLevel}/${s.level.expRequired}，还差 ${s.level.expToNext} 经验升级）｜ 累计经验 ${s.exp} ｜ 背包 ${s.backpack.length} 张券`)
   if (s.backpack.length)
     for (const c of s.backpack) console.log(`   🎟️ ${c.title}（${c.id}，实付 ${-c.points} 分，回收可得 ${Math.floor(-c.points * 0.8)} 分）`)
 }
@@ -124,12 +144,15 @@ function ensureVoucherActive(entries, id) {
   const e = findEntry(entries, id, 'redeem_voucher')
   const spent = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === id)
   if (spent) fail(`券 ${id} 已被${spent.type === 'use_voucher' ? '核销' : '回收'}（记录 ${spent.id}），不能重复操作`)
+  const reversed = entries.find((x) => x.type === 'adjust' && x.ref === id && x.points === -e.points)
+  if (reversed) fail(`券 ${id} 的兑换已被全额冲正（记录 ${reversed.id}），券已作废，不能再核销/回收`)
   return e
 }
 
 // ---------- 命令 ----------
 const [, , cmd, ...rest] = process.argv
 const dataDir = resolveDataDir()
+globalThis.__dataDir = dataDir
 
 function parseArgs(args) {
   const opts = {}
@@ -142,6 +165,13 @@ function parseArgs(args) {
 function mkEntry(type, title, points, exp, extra = {}) {
   const now = new Date()
   return { id: genId(now), time: isoTime(now), type, title, points, exp, ...extra }
+}
+
+function readShop(dataDir) {
+  const shopPath = join(dataDir, 'shop.json')
+  if (!existsSync(shopPath)) fail('缺少 shop.json')
+  const shop = JSON.parse(readFileSync(shopPath, 'utf8'))
+  return Array.isArray(shop) ? shop : (shop.items ?? [])
 }
 
 switch (cmd) {
@@ -180,6 +210,8 @@ switch (cmd) {
     const dPoints = fullReverse ? -orig.points : Number(opts.points ?? 0)
     const dExp = fullReverse ? -orig.exp : Number(opts.exp ?? 0)
     if (!Number.isFinite(dPoints) || !Number.isFinite(dExp)) fail('--points / --exp 必须是数字')
+    if (fullReverse && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
+      fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
     const entry = mkEntry('adjust', String(opts.title ?? `冲正：${orig.title}`), dPoints, dExp, {
       ref: orig.id,
       ...(opts.note ? { note: String(opts.note) } : { note: fullReverse ? `全额冲正 ${orig.id}` : `更正 ${orig.id}` }),
@@ -192,21 +224,21 @@ switch (cmd) {
   case 'redeem': {
     const [itemId] = rest
     if (!itemId) fail('用法：redeem <itemId> [--note "..."]')
-    const shopPath = join(dataDir, 'shop.json')
-    if (!existsSync(shopPath)) fail('缺少 shop.json')
-    const shop = JSON.parse(readFileSync(shopPath, 'utf8'))
-    const items = Array.isArray(shop) ? shop : (shop.items ?? [])
-    const item = items.find((x) => x.id === itemId)
+    const item = readShop(dataDir).find((x) => x.id === itemId)
     if (!item) fail(`shop.json 里没有商品 ${itemId}`)
+    const rate = readRate(dataDir)
+    const note = parseArgs(rest.slice(1)).note
     let price, extra
     if (item.type === 'voucher') {
       price = item.points ?? fail(`虚拟券 ${item.name} 缺少 points 定价`)
-      extra = { note: `虚拟券兑换，入背包${parseArgs(rest.slice(2)).note ? '；' + parseArgs(rest.slice(2)).note : ''}` }
+      extra = { note: `虚拟券兑换，入背包${note ? '；' + note : ''}` }
     } else {
       if (item.yuan === undefined) fail(`实物 ${item.name} 缺少 yuan 定价`)
-      price = Math.ceil(item.yuan * PHYSICAL_RATE)
-      extra = { rate: PHYSICAL_RATE, note: `实物兑换 ¥${item.yuan} × ${PHYSICAL_RATE}${parseArgs(rest.slice(2)).note ? '；' + parseArgs(rest.slice(2)).note : ''}` }
+      price = Math.ceil(item.yuan * rate)
+      extra = { rate, note: `实物兑换 ¥${item.yuan} × ${rate}${note ? '；' + note : ''}` }
     }
+    const balance = summarize(readLedger(dataDir)).points
+    if (balance < price) fail(`余额不足：当前 ${balance} 分，兑换 ${item.name} 需要 ${price} 分（还差 ${price - balance} 分）`)
     const entry = mkEntry(item.type === 'voucher' ? 'redeem_voucher' : 'redeem_physical', item.name, -price, 0, extra)
     writeEntry(dataDir, entry)
     ok(`兑换成功：${item.name} −${price} 分${item.type === 'voucher' ? '（券已入背包，用 use 核销 / recycle 回收）' : ''}`)
@@ -219,7 +251,7 @@ switch (cmd) {
     if (!id) fail(`用法：${cmd} <redeemId> [--note "..."]`)
     const entries = readLedger(dataDir)
     const orig = ensureVoucherActive(entries, id)
-    const opts = parseArgs(rest.slice(2))
+    const opts = parseArgs(rest.slice(1))
     if (cmd === 'use') {
       writeEntry(dataDir, mkEntry('use_voucher', `核销：${orig.title}`, 0, 0, { ref: orig.id, ...(opts.note ? { note: String(opts.note) } : {}) }))
       ok(`核销成功：${orig.title}（不扣积分）`)
@@ -231,6 +263,67 @@ switch (cmd) {
     reportSummary(readLedger(dataDir))
     break
   }
+  case 'doctor': {
+    const problems = []
+    const seen = new Map()
+    const entries = []
+    const ledgerDir = join(dataDir, 'ledger')
+    if (!existsSync(ledgerDir)) { problems.push('缺少 ledger/ 目录') }
+    else {
+      const walk = (dir, rel) => {
+        for (const name of readdirSync(dir)) {
+          const full = join(dir, name)
+          const relName = rel ? `${rel}/${name}` : name
+          if (statSync(full).isDirectory()) { walk(full, relName); continue }
+          if (!name.endsWith('.json') || name.endsWith('.tmp')) continue
+          try {
+            const e = JSON.parse(readFileSync(full, 'utf8'))
+            for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
+              if (e[k] === undefined) problems.push(`ledger/${relName} 缺少字段 ${k}`)
+            if (!VALID_TYPES.has(e.type)) problems.push(`ledger/${relName} 未知类型 ${e.type}`)
+            if (!Number.isFinite(e.points) || !Number.isFinite(e.exp)) problems.push(`ledger/${relName} points/exp 不是数字`)
+            if (seen.has(e.id)) problems.push(`重复 id：${e.id}（${seen.get(e.id)} 与 ledger/${relName}）`)
+            seen.set(e.id, `ledger/${relName}`)
+            entries.push(e)
+          } catch (err) { problems.push(`坏文件 ledger/${relName}: ${err.message}`) }
+        }
+      }
+      walk(ledgerDir, '')
+    }
+    // ref 完整性
+    for (const e of entries) {
+      if (e.ref && !seen.has(e.ref)) problems.push(`${e.id}（${e.type}）引用了不存在的 ref：${e.ref}`)
+      if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
+        const orig = entries.find((x) => x.id === e.ref)
+        if (orig && orig.type !== 'redeem_voucher') problems.push(`${e.id} 的 ref ${e.ref} 不是虚拟券兑换（是 ${orig.type}）`)
+      }
+    }
+    // 同一张券被多次核销/回收
+    const consumeCount = new Map()
+    for (const e of entries) {
+      if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref)
+        consumeCount.set(e.ref, (consumeCount.get(e.ref) ?? 0) + 1)
+    }
+    for (const [ref, n] of consumeCount) if (n > 1) problems.push(`券 ${ref} 被核销/回收了 ${n} 次`)
+    // 同一条记录被多次全额冲正
+    const reverseCount = new Map()
+    for (const e of entries) {
+      if (e.type === 'adjust' && e.ref) {
+        const orig = entries.find((x) => x.id === e.ref)
+        if (orig && e.points === -orig.points && e.exp === -orig.exp)
+          reverseCount.set(e.ref, (reverseCount.get(e.ref) ?? 0) + 1)
+      }
+    }
+    for (const [ref, n] of reverseCount) if (n > 1) problems.push(`记录 ${ref} 被全额冲正了 ${n} 次`)
+    if (problems.length === 0) {
+      ok(`账本自检通过：共 ${entries.length} 条流水，无问题`)
+    } else {
+      for (const p of problems) console.error('⚠ ' + p)
+      console.error(`❌ 自检发现 ${problems.length} 个问题`)
+      process.exit(1)
+    }
+    break
+  }
   default:
-    fail('未知命令。可用：summary / list / earn / adjust / redeem / use / recycle', 2)
+    fail('未知命令。可用：summary / list / earn / adjust / redeem / use / recycle / doctor', 2)
 }

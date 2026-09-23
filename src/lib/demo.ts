@@ -11,6 +11,9 @@ export async function loadDemoBundle(): Promise<DataBundle> {
     entries: ledger,
     shop: shop.items ?? shop,
     pricing: tasks,
+    rate: 20,
+    readAt: new Date().toISOString(),
+    dirName: '演示数据',
     warnings: ['演示模式：数据来自项目内置示例，刷新或部署后可换成真实目录'],
   }
 }
