@@ -53,15 +53,18 @@ export function recycleValue(paidPoints: number): number {
 export function summarize(entries: LedgerEntry[]): Summary {
   let points = 0
   let exp = 0
+  // 两遍扫描：先收集被核销/回收的兑换 id，再收集背包 —— 与流水读取顺序无关
+  const consumedRefs = new Set<string>()
+  for (const e of entries) {
+    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
+      consumedRefs.add(e.ref)
+    }
+  }
   const backpack: LedgerEntry[] = []
   for (const e of entries) {
     points += e.points
     exp += e.exp
-    if (e.type === 'redeem_voucher') backpack.push(e)
-    if (e.type === 'use_voucher' || e.type === 'recycle_voucher') {
-      const i = backpack.findIndex((b) => b.id === e.ref)
-      if (i >= 0) backpack.splice(i, 1)
-    }
+    if (e.type === 'redeem_voucher' && !consumedRefs.has(e.id)) backpack.push(e)
   }
   return { points, exp, level: levelFromExp(exp), backpack }
 }

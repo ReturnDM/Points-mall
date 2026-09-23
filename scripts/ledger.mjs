@@ -13,7 +13,7 @@
  *   node scripts/ledger.mjs use <redeemId> [--note "..."]    # 核销虚拟券
  *   node scripts/ledger.mjs recycle <redeemId> [--note "..."] # 回收（返还原实付 80%）
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -67,21 +67,24 @@ function writeEntry(dataDir, entry) {
   return final
 }
 
-/** 递归读取全部流水 */
+/** 递归读取全部流水（兼容平铺与按年-月等任意层级子目录） */
 function readLedger(dataDir) {
   const out = []
   const ledgerDir = join(dataDir, 'ledger')
   if (!existsSync(ledgerDir)) return out
-  for (const month of readdirSync(ledgerDir)) {
-    const mDir = join(ledgerDir, month)
-    try {
-      for (const f of readdirSync(mDir)) {
-        if (!f.endsWith('.json') || f.endsWith('.tmp')) continue
-        try { out.push(JSON.parse(readFileSync(join(mDir, f), 'utf8'))) }
-        catch (e) { console.error(`⚠ 跳过坏文件 ledger/${month}/${f}: ${e.message}`) }
+  const walk = (dir, rel) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      const relName = rel ? `${rel}/${name}` : name
+      if (statSync(full).isDirectory()) {
+        walk(full, relName)
+      } else if (name.endsWith('.json') && !name.endsWith('.tmp')) {
+        try { out.push(JSON.parse(readFileSync(full, 'utf8'))) }
+        catch (e) { console.error(`⚠ 跳过坏文件 ledger/${relName}: ${e.message}`) }
       }
-    } catch { /* not a dir */ }
+    }
   }
+  walk(ledgerDir, '')
   return out
 }
 
@@ -94,15 +97,13 @@ function levelFromExp(exp) {
 }
 function summarize(entries) {
   let points = 0, exp = 0
-  const backpack = []
+  // 两遍扫描：先收集被核销/回收的兑换 id，再收集背包 —— 与流水读取顺序无关
+  const consumedRefs = new Set()
   for (const e of entries) {
-    points += e.points; exp += e.exp
-    if (e.type === 'redeem_voucher') backpack.push(e)
-    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
-      const i = backpack.findIndex((b) => b.id === e.ref)
-      if (i >= 0) backpack.splice(i, 1)
-    }
+    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) consumedRefs.add(e.ref)
   }
+  const backpack = entries.filter((e) => e.type === 'redeem_voucher' && !consumedRefs.has(e.id))
+  for (const e of entries) { points += e.points; exp += e.exp }
   return { points, exp, level: levelFromExp(exp), backpack }
 }
 function reportSummary(entries) {
@@ -185,7 +186,7 @@ switch (cmd) {
     })
     writeEntry(dataDir, entry)
     ok(`更正成功（${fullReverse ? '全额冲正' : '差额更正'} ${orig.id}）：积分 ${dPoints >= 0 ? '+' : ''}${dPoints}，经验 ${dExp >= 0 ? '+' : ''}${dExp}`)
-    reportSummary(entries)
+    reportSummary(readLedger(dataDir))
     break
   }
   case 'redeem': {
@@ -227,7 +228,7 @@ switch (cmd) {
       writeEntry(dataDir, mkEntry('recycle_voucher', `回收：${orig.title}`, back, 0, { ref: orig.id, note: `原实付 ${-orig.points} 分 × 80%${opts.note ? '；' + opts.note : ''}` }))
       ok(`回收成功：${orig.title} +${back} 分（原实付 ${-orig.points} × 80%，不加经验）`)
     }
-    reportSummary(entries)
+    reportSummary(readLedger(dataDir))
     break
   }
   default:

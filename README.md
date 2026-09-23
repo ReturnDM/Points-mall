@@ -34,8 +34,15 @@ src/
 public/demo/       # 演示数据
 seed/              # 数据目录初始模板（init-data 拷贝用）
 docs/              # schema 定稿 + Agent 记账规范
-scripts/init-data.mjs
+scripts/
+  init-data.mjs     # 初始化数据目录
+  ledger.mjs        # 记账 CLI（Agent 增删查改唯一入口）
 ```
+
+## 记账接口
+
+本项目**不使用 skill**：Agent 直接调 `node scripts/ledger.mjs`（详见根目录 `AGENTS.md` 与 `docs/agent-ledger.md`）。
+schema 校验 / id 生成 / 原子写 / ref 完整性都固化在 CLI 里；无固定分值事项由主模型与 Jev 各判一次，差 ≤50% 取平均。
 
 ## 视觉规范
 
@@ -46,5 +53,5 @@ scripts/init-data.mjs
 
 - [x] 静态只读前端 + 数据 schema + 汇总计算
 - [x] 手绘风 UI
-- [x] 记账 Skill（`points-ledger`，项目级 `.dsh/skills/`，意图分流 + Jev/模型双判，差 >50% 重审计）
+- [x] 记账 CLI（`scripts/ledger.mjs`：summary / list / earn / adjust / redeem / use / recycle）
 - [ ] Jev 评分实际接入调优（跑一段时间校准 50% 阈值）
