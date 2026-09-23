@@ -13,6 +13,7 @@
  *   node scripts/ledger.mjs use <redeemId> [--note "..."]    # 核销虚拟券
  *   node scripts/ledger.mjs recycle <redeemId> [--note "..."] # 回收（返还原实付 80%）
  *   node scripts/ledger.mjs doctor                       # 账本自检：坏流水/重复id/无效ref/重复核销
+ *   node scripts/ledger.mjs judge "<事项描述>" [--context "..."]  # Jev 定档建议（需 TYPESAFE_API_KEY）
  */
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
@@ -324,6 +325,57 @@ switch (cmd) {
     }
     break
   }
+  case 'judge': {
+    // Jev 定档建议：node scripts/ledger.mjs judge "<事项描述>" [--context "补充上下文"]
+    // 需要环境变量 TYPESAFE_API_KEY（https://console.typesafe.ai/keys）
+    const [desc] = rest
+    if (!desc) fail('用法：judge "<事项描述>" [--context "补充上下文"]')
+    const key = process.env.TYPESAFE_API_KEY
+    if (!key) fail('未配置 TYPESAFE_API_KEY 环境变量（从 https://console.typesafe.ai/keys 获取后 setx TYPESAFE_API_KEY <key>）；Jev 复核不可用，可自行定档并在 note 标注')
+    const opts = parseArgs(rest.slice(1))
+    const tasksPath = join(dataDir, 'tasks.json')
+    let tiers = [5, 10, 20, 50, 100, 200]
+    try {
+      tiers = JSON.parse(readFileSync(tasksPath, 'utf8')).tiers ?? tiers
+    } catch { /* 用默认档位 */ }
+    const criteria = {}
+    for (const t of tiers) criteria[String(t)] = `约 ${t} 分档：${t <= 10 ? '几分钟的日常小事' : t <= 20 ? '半小时内的事务性工作' : t <= 50 ? '几小时、相当于一次课程作业的工作量' : t <= 100 ? '一整天投入或一个完整功能/成果' : '多天的大工程或重大成果'}`
+    const state = [
+      `事项：${desc}`,
+      opts.context ? `上下文：${opts.context}` : '',
+      '这是个人生活游戏化积分系统，按完成事项的工作量给积分（1 积分=一次微小完成，100 积分≈一整天工作量）。',
+      '请从给定档位中选择最匹配的档位。',
+    ].filter(Boolean).join('\n')
+    let resp
+    try {
+      resp = await fetch('https://api.typesafe.ai/v1/systemone', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state,
+          model: 'jev-latest',
+          questions: {
+            tier: {
+              type: 'choice',
+              instructions: '该事项完成应得哪个积分档位？按实际工作量与投入时间判断。',
+              criteria,
+            },
+          },
+        }),
+      })
+    } catch (e) {
+      fail(`Jev 网络调用失败：${e.message}（可自行定档并在 note 标注「未经 Jev 复核」）`)
+    }
+    if (!resp.ok) fail(`Jev API 返回 ${resp.status}：${await resp.text().then((t) => t.slice(0, 300))}`)
+    const data = await resp.json()
+    const a = data.answers?.tier
+    if (!a) fail('Jev 返回中没有 tier 答案')
+    ok(`Jev 建议档位：${a.choice} 分（置信度 ${(a.confidence * 100).toFixed(0)}%）`)
+    const probs = Object.entries(a.probabilities ?? {}).map(([k, v]) => `${k}分:${(v * 100).toFixed(0)}%`).join('  ')
+    console.log(`   概率分布：${probs}`)
+    console.log('   建议流程：与主模型判断对比，相差 ≤50% 取平均；>50% 重新审计一轮，仍分歧则问用户')
+    break
+  }
   default:
-    fail('未知命令。可用：summary / list / earn / adjust / redeem / use / recycle / doctor', 2)
+    fail('未知命令。可用：summary / list / earn / adjust / redeem / use / recycle / doctor / judge', 2)
 }
