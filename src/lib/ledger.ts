@@ -53,11 +53,18 @@ export function recycleValue(paidPoints: number): number {
 export function summarize(entries: LedgerEntry[]): Summary {
   let points = 0
   let exp = 0
-  // 两遍扫描：先收集被核销/回收的兑换 id，再收集背包 —— 与流水读取顺序无关
+  // 两遍扫描：先收集「券已被消费」的兑换 id —— 与流水读取顺序无关。
+  // 消费 = use/recycle 引用；或 adjust 全额冲正了一条 redeem_voucher（积分已退回，券作废）。
+  // 口径必须与 scripts/ledger.mjs 的 summarize 一致。
   const consumedRefs = new Set<string>()
   for (const e of entries) {
     if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
       consumedRefs.add(e.ref)
+      continue
+    }
+    if (e.type === 'adjust' && e.ref) {
+      const orig = entries.find((x) => x.id === e.ref)
+      if (orig?.type === 'redeem_voucher' && e.points === -orig.points) consumedRefs.add(orig.id)
     }
   }
   const backpack: LedgerEntry[] = []

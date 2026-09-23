@@ -77,11 +77,13 @@ function writeEntry(dataDir, entry) {
   return final
 }
 
-/** 递归读取全部流水（兼容平铺与按年-月等任意层级子目录） */
-function readLedger(dataDir) {
-  const out = []
+/** 递归读取全部流水（兼容平铺与按年-月等任意层级子目录）。
+ *  返回 { entries, bad }；bad = 坏文件清单，写账命令必须据此拒绝写入。 */
+function readLedgerEx(dataDir) {
+  const entries = []
+  const bad = []
   const ledgerDir = join(dataDir, 'ledger')
-  if (!existsSync(ledgerDir)) return out
+  if (!existsSync(ledgerDir)) return { entries, bad }
   const walk = (dir, rel) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name)
@@ -89,13 +91,31 @@ function readLedger(dataDir) {
       if (statSync(full).isDirectory()) {
         walk(full, relName)
       } else if (name.endsWith('.json') && !name.endsWith('.tmp')) {
-        try { out.push(JSON.parse(readFileSync(full, 'utf8'))) }
-        catch (e) { console.error(`⚠ 跳过坏文件 ledger/${relName}: ${e.message}`) }
+        try { entries.push(JSON.parse(readFileSync(full, 'utf8'))) }
+        catch (e) { bad.push(`ledger/${relName}: ${e.message}`) }
       }
     }
   }
   walk(ledgerDir, '')
-  return out
+  return { entries, bad }
+}
+
+/** 普通读取：坏文件告警后跳过（list / summary / doctor 可用） */
+function readLedger(dataDir) {
+  const { entries, bad } = readLedgerEx(dataDir)
+  for (const b of bad) console.error(`⚠ 跳过坏文件 ${b}`)
+  return entries
+}
+
+/** 严格读取：任何坏文件都拒绝——写账前账本必须完整可读 */
+function readLedgerStrict(dataDir) {
+  const { entries, bad } = readLedgerEx(dataDir)
+  if (bad.length > 0) {
+    console.error('账本中存在无法解析的流水文件，拒绝写账（防止在坏数据上继续叠加）：')
+    for (const b of bad) console.error(`  ⚠ ${b}`)
+    fail(`共 ${bad.length} 个坏文件，先修复或移走它们（可用 doctor 查看），再重试`)
+  }
+  return entries
 }
 
 // ---------- 汇总计算 ----------
@@ -195,6 +215,7 @@ switch (cmd) {
     if (!title || !Number.isFinite(Number(pointsStr))) fail('用法：earn <title> <points> [--note "..."]')
     const pts = Number(pointsStr)
     if (pts <= 0) fail('earn 的积分必须为正数；冲正请用 adjust --ref')
+    readLedgerStrict(dataDir)
     const opts = parseArgs(rest.slice(2))
     const entry = mkEntry('earn', title, pts, pts, opts.note ? { note: String(opts.note) } : {})
     writeEntry(dataDir, entry)
@@ -205,7 +226,7 @@ switch (cmd) {
   case 'adjust': {
     const opts = parseArgs(rest)
     if (!opts.ref) fail('用法：adjust --ref <id> [--points Δ] [--exp Δ] [--title "..."] [--note "..."]；不带 Δ 则全额冲正')
-    const entries = readLedger(dataDir)
+    const entries = readLedgerStrict(dataDir)
     const orig = findEntry(entries, opts.ref)
     const fullReverse = opts.points === undefined && opts.exp === undefined
     const dPoints = fullReverse ? -orig.points : Number(opts.points ?? 0)
@@ -213,6 +234,12 @@ switch (cmd) {
     if (!Number.isFinite(dPoints) || !Number.isFinite(dExp)) fail('--points / --exp 必须是数字')
     if (fullReverse && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
       fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
+    if (orig.type === 'redeem_voucher') {
+      const consumed = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === orig.id)
+      if (consumed && dPoints > 0)
+        fail(`券 ${orig.id} 已被${consumed.type === 'use_voucher' ? '核销' : '回收'}（记录 ${consumed.id}），冲正原兑换会重复返分。` +
+          (consumed.type === 'recycle_voucher' ? `如需撤销回收，请对回收记录 ${consumed.id} 做 adjust 冲正` : '如需更正请对核销记录操作'))
+    }
     const entry = mkEntry('adjust', String(opts.title ?? `冲正：${orig.title}`), dPoints, dExp, {
       ref: orig.id,
       ...(opts.note ? { note: String(opts.note) } : { note: fullReverse ? `全额冲正 ${orig.id}` : `更正 ${orig.id}` }),
@@ -231,14 +258,15 @@ switch (cmd) {
     const note = parseArgs(rest.slice(1)).note
     let price, extra
     if (item.type === 'voucher') {
-      price = item.points ?? fail(`虚拟券 ${item.name} 缺少 points 定价`)
+      price = item.points
+      if (!Number.isFinite(price) || price <= 0) fail(`虚拟券 ${item.name} 的 points 定价非法（${JSON.stringify(item.points)}）：必须是正数；请先修正 shop.json`)
       extra = { note: `虚拟券兑换，入背包${note ? '；' + note : ''}` }
     } else {
-      if (item.yuan === undefined) fail(`实物 ${item.name} 缺少 yuan 定价`)
+      if (!Number.isFinite(item.yuan) || item.yuan <= 0) fail(`实物 ${item.name} 的 yuan 定价非法（${JSON.stringify(item.yuan)}）：必须是正数；请先修正 shop.json`)
       price = Math.ceil(item.yuan * rate)
       extra = { rate, note: `实物兑换 ¥${item.yuan} × ${rate}${note ? '；' + note : ''}` }
     }
-    const balance = summarize(readLedger(dataDir)).points
+    const balance = summarize(readLedgerStrict(dataDir)).points
     if (balance < price) fail(`余额不足：当前 ${balance} 分，兑换 ${item.name} 需要 ${price} 分（还差 ${price - balance} 分）`)
     const entry = mkEntry(item.type === 'voucher' ? 'redeem_voucher' : 'redeem_physical', item.name, -price, 0, extra)
     writeEntry(dataDir, entry)
@@ -250,7 +278,7 @@ switch (cmd) {
   case 'recycle': {
     const [id] = rest
     if (!id) fail(`用法：${cmd} <redeemId> [--note "..."]`)
-    const entries = readLedger(dataDir)
+    const entries = readLedgerStrict(dataDir)
     const orig = ensureVoucherActive(entries, id)
     const opts = parseArgs(rest.slice(1))
     if (cmd === 'use') {
@@ -316,6 +344,14 @@ switch (cmd) {
       }
     }
     for (const [ref, n] of reverseCount) if (n > 1) problems.push(`记录 ${ref} 被全额冲正了 ${n} 次`)
+    // 已消费的券又被冲正返分（重复返分）
+    for (const e of entries) {
+      if (e.type !== 'adjust' || !e.ref || e.points <= 0) continue
+      const orig = entries.find((x) => x.id === e.ref)
+      if (orig?.type !== 'redeem_voucher') continue
+      const consumed = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === orig.id && x.time <= e.time)
+      if (consumed) problems.push(`adjust ${e.id} 对已${consumed.type === 'use_voucher' ? '核销' : '回收'}的券 ${orig.id} 返分（重复返分风险）`)
+    }
     if (problems.length === 0) {
       ok(`账本自检通过：共 ${entries.length} 条流水，无问题`)
     } else {
@@ -392,6 +428,12 @@ switch (cmd) {
       const effortProbs = Object.entries(eff.probabilities ?? {}).map(([k, v]) => `${tiers[Number(k)]}分:${(v * 100).toFixed(0)}%`).join('  ')
       console.log(`   工作量位置：${eff.score.toFixed(2)}（介于 ${tiers[lo]} 与 ${tiers[hi]} 分之间）→ 插值 ≈ ${interpolated} 分（置信度 ${(eff.confidence * 100).toFixed(0)}%）`)
       console.log(`   位置分布：${effortProbs}`)
+      // 跨档警告：概率质量散布在不相邻的档位上时，插值没有实际意义
+      const significant = Object.entries(eff.probabilities ?? {})
+        .map(([k, v]) => ({ idx: Number(k), v }))
+        .filter((x) => x.v >= 0.2)
+      if (significant.length > 1 && Math.max(...significant.map((x) => x.idx)) - Math.min(...significant.map((x) => x.idx)) >= 2)
+        console.log('   ⚠ 注意：概率散布在不相邻档位上，Jev 对工作量拿不准，插值仅供参考——建议按上下文重判或问用户')
       ok(`Jev 综合建议：${interpolated} 分（选档 ${a.choice} + 位置插值）`)
     } else {
       ok(`Jev 建议：${a.choice} 分`)
