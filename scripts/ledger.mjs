@@ -94,14 +94,16 @@ function readLedgerEx(dataDir) {
       } else if (name.endsWith('.json') && !name.endsWith('.tmp')) {
         try {
           const e = JSON.parse(readFileSync(full, 'utf8'))
-          entries.push(e)
-          // 字段级校验：缺 exp 会让等级变 NaN，字符串 points 会让余额拼错
+          // 字段级校验：通过的才进 entries（summary 也不会再被坏数据污染出 NaN）
+          const errs = []
           for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
-            if (e[k] === undefined) invalid.push(`ledger/${relName}: 缺少字段 ${k}`)
+            if (e[k] === undefined) errs.push(`缺少字段 ${k}`)
           if (!Number.isFinite(e.points) || !Number.isFinite(e.exp))
-            invalid.push(`ledger/${relName}: points/exp 不是有限数字（${JSON.stringify([e.points, e.exp])}）`)
-          if (e.type && !VALID_TYPES.has(e.type)) invalid.push(`ledger/${relName}: 未知类型 ${e.type}`)
-          if (e.time && Number.isNaN(Date.parse(e.time))) invalid.push(`ledger/${relName}: time 不是合法时间`)
+            errs.push(`points/exp 不是有限数字（${JSON.stringify([e.points, e.exp])}）`)
+          if (e.type && !VALID_TYPES.has(e.type)) errs.push(`未知类型 ${e.type}`)
+          if (e.time && Number.isNaN(Date.parse(e.time))) errs.push('time 不是合法时间')
+          if (errs.length > 0) invalid.push(`ledger/${relName}: ${errs.join('；')}`)
+          else entries.push(e)
         } catch (err) { bad.push(`ledger/${relName}: ${err.message}`) }
       }
     }
@@ -132,6 +134,30 @@ function readLedgerStrict(dataDir) {
 
 // ---------- 汇总计算 ----------
 const EXP_FOR = (lv) => 100 + 10 * (lv - 1)
+
+/** 唯一权威判定：一条记录是否已被「累计全额冲正」 */
+function isFullyReversed(entries, rec) {
+  return entries.some((x) => x.type === 'adjust' && x.ref === rec.id && x.points === -rec.points && x.exp === -rec.exp)
+}
+
+/** 唯一权威判定：每张虚拟券当前是否被有效消费（核销或回收，且该消费记录未被全额冲正撤销）。
+ *  summarize（背包）、ensureVoucherActive（券可否操作）、doctor 必须共用本函数，禁止各自另算。 */
+function computeConsumed(entries) {
+  const consumed = new Set()
+  // 1) adjust 全额冲正了兑换记录本身 → 券作废
+  for (const e of entries) {
+    if (e.type === 'adjust' && e.ref) {
+      const orig = entries.find((x) => x.id === e.ref)
+      if (orig?.type === 'redeem_voucher' && e.points === -orig.points && e.exp === -orig.exp) consumed.add(orig.id)
+    }
+  }
+  // 2) 有效（未被撤销）的核销/回收 → 券被消费；已被全额冲正的消费记录不算数
+  for (const e of entries) {
+    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref && !isFullyReversed(entries, e)) consumed.add(e.ref)
+  }
+  return consumed
+}
+
 function levelFromExp(exp) {
   let lv = 1, rest = Math.max(0, exp), need = EXP_FOR(lv)
   while (rest >= need) { rest -= need; lv++; need = EXP_FOR(lv) }
@@ -141,27 +167,7 @@ const VALID_TYPES = new Set(['earn', 'redeem_physical', 'redeem_voucher', 'use_v
 
 function summarize(entries) {
   let points = 0, exp = 0
-  // 两遍扫描：先收集「券已被消费」的兑换 id —— 与流水读取顺序无关。
-  // 消费 = use/recycle 引用；adjust 全额冲正 redeem_voucher → 券作废（加入消费）；
-  // adjust 全额冲正 use/recycle 记录 → 撤销消费，券回到背包（从消费集中移除）。
-  const consumedRefs = new Set()
-  for (const e of entries) {
-    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
-      consumedRefs.add(e.ref)
-      continue
-    }
-    if (e.type === 'adjust' && e.ref) {
-      const orig = entries.find((x) => x.id === e.ref)
-      if (orig?.type === 'redeem_voucher' && e.points === -orig.points) consumedRefs.add(orig.id)
-    }
-  }
-  for (const e of entries) {
-    if (e.type === 'adjust' && e.ref) {
-      const orig = entries.find((x) => x.id === e.ref)
-      if ((orig?.type === 'use_voucher' || orig?.type === 'recycle_voucher') && e.points === -orig.points && e.exp === -orig.exp)
-        consumedRefs.delete(orig.ref)
-    }
-  }
+  const consumedRefs = computeConsumed(entries)
   const backpack = entries.filter((e) => e.type === 'redeem_voucher' && !consumedRefs.has(e.id))
   for (const e of entries) { points += e.points; exp += e.exp }
   return { points, exp, level: levelFromExp(exp), backpack }
@@ -183,10 +189,15 @@ function findEntry(entries, id, expectType) {
 }
 function ensureVoucherActive(entries, id) {
   const e = findEntry(entries, id, 'redeem_voucher')
-  const spent = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === id)
-  if (spent) fail(`券 ${id} 已被${spent.type === 'use_voucher' ? '核销' : '回收'}（记录 ${spent.id}），不能重复操作`)
-  const reversed = entries.find((x) => x.type === 'adjust' && x.ref === id && x.points === -e.points)
-  if (reversed) fail(`券 ${id} 的兑换已被全额冲正（记录 ${reversed.id}），券已作废，不能再核销/回收`)
+  if (isFullyReversed(entries, e)) {
+    const rev = entries.find((x) => x.type === 'adjust' && x.ref === id && x.points === -e.points && x.exp === -e.exp)
+    fail(`券 ${id} 的兑换已被全额冲正（记录 ${rev.id}），券已作废，不能再核销/回收`)
+  }
+  const consumed = computeConsumed(entries)
+  if (consumed.has(id)) {
+    const spent = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === id)
+    fail(`券 ${id} 已被${spent.type === 'use_voucher' ? '核销' : '回收'}（记录 ${spent.id}），不能重复操作`)
+  }
   return e
 }
 
@@ -252,18 +263,24 @@ switch (cmd) {
     const dPoints = fullReverse ? -orig.points : Number(opts.points ?? 0)
     const dExp = fullReverse ? -orig.exp : Number(opts.exp ?? 0)
     if (!Number.isFinite(dPoints) || !Number.isFinite(dExp)) fail('--points / --exp 必须是数字')
-    if (fullReverse && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
+    // 零值记录（核销 0/0）的冲正 = 撤销核销，语义在券状态里，不适用积分防重
+    const zeroOrig = orig.points === 0 && orig.exp === 0
+    if (fullReverse && !zeroOrig && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
       fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
-    // 按累计冲正金额防重：不论显式差额还是全额，累计冲正已达原记录全额的，不再接受继续冲正
+    // 按累计冲正金额防重：累计不得达到或超过原记录全额（零值记录除外）
     const adjSum = entries.reduce((s, x) => (x.type === 'adjust' && x.ref === orig.id ? { p: s.p + x.points, e: s.e + x.exp } : s), { p: 0, e: 0 })
-    const fullyOffsetBefore = adjSum.p === -orig.points && adjSum.e === -orig.exp
-    if (fullyOffsetBefore)
-      fail(`记录 ${orig.id} 的累计冲正已覆盖全额（已冲 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验），不能再冲正（会超冲）；如需再改，请对新产生的 adjust 记录操作`)
+    if (!zeroOrig) {
+      const fullyOffsetBefore = adjSum.p === -orig.points && adjSum.e === -orig.exp
+      // 超冲：冲正后累计越过原记录的反向全额（如 +50 的账已冲 -20 再冲 -40）
+      const overP = orig.points >= 0 ? adjSum.p + dPoints < -orig.points : adjSum.p + dPoints > -orig.points
+      const overE = orig.exp >= 0 ? adjSum.e + dExp < -orig.exp : adjSum.e + dExp > -orig.exp
+      if (fullyOffsetBefore || overP || overE)
+        fail(`记录 ${orig.id} 的累计冲正将越过全额（已冲 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验，本次再冲 ${dPoints >= 0 ? '+' : ''}${dPoints} / ${dExp >= 0 ? '+' : ''}${dExp}）；最大可冲至 ${-orig.points} 分 / ${-orig.exp} 经验`)
+    }
     if (orig.type === 'redeem_voucher') {
-      const consumed = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === orig.id)
-      if (consumed && dPoints > 0)
-        fail(`券 ${orig.id} 已被${consumed.type === 'use_voucher' ? '核销' : '回收'}（记录 ${consumed.id}），冲正原兑换会重复返分。` +
-          (consumed.type === 'recycle_voucher' ? `如需撤销回收，请对回收记录 ${consumed.id} 做 adjust 冲正` : '如需更正请对核销记录操作'))
+      const consumed = computeConsumed(entries)
+      if (consumed.has(orig.id) && dPoints > 0)
+        fail(`券 ${orig.id} 已被有效核销/回收，冲正原兑换会重复返分。如需撤销消费，请对对应的使用/回收记录做 adjust 冲正`)
     }
     const entry = mkEntry('adjust', String(opts.title ?? `冲正：${orig.title}`), dPoints, dExp, {
       ref: orig.id,
@@ -352,10 +369,10 @@ switch (cmd) {
         if (orig && orig.type !== 'redeem_voucher') problems.push(`${e.id} 的 ref ${e.ref} 不是虚拟券兑换（是 ${orig.type}）`)
       }
     }
-    // 同一张券被多次核销/回收
+    // 同一张券被多次「有效」核销/回收（被全额冲正撤销的消费不算）
     const consumeCount = new Map()
     for (const e of entries) {
-      if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref)
+      if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref && !isFullyReversed(entries, e))
         consumeCount.set(e.ref, (consumeCount.get(e.ref) ?? 0) + 1)
     }
     for (const [ref, n] of consumeCount) if (n > 1) problems.push(`券 ${ref} 被核销/回收了 ${n} 次`)
@@ -369,13 +386,13 @@ switch (cmd) {
       }
     }
     for (const [ref, n] of reverseCount) if (n > 1) problems.push(`记录 ${ref} 被全额冲正了 ${n} 次`)
-    // 已消费的券又被冲正返分（重复返分）
+    // 已被「有效」消费的券又被冲正返分（重复返分）——口径同 computeConsumed
+    const consumedActive = computeConsumed(entries)
     for (const e of entries) {
       if (e.type !== 'adjust' || !e.ref || e.points <= 0) continue
       const orig = entries.find((x) => x.id === e.ref)
       if (orig?.type !== 'redeem_voucher') continue
-      const consumed = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === orig.id && x.time <= e.time)
-      if (consumed) problems.push(`adjust ${e.id} 对已${consumed.type === 'use_voucher' ? '核销' : '回收'}的券 ${orig.id} 返分（重复返分风险）`)
+      if (consumedActive.has(orig.id)) problems.push(`adjust ${e.id} 对已被有效消费的券 ${orig.id} 返分（重复返分风险）`)
     }
     if (problems.length === 0) {
       ok(`账本自检通过：共 ${entries.length} 条流水，无问题`)
@@ -444,6 +461,7 @@ switch (cmd) {
     ok(`Jev 选档：${a.choice} 分（置信度 ${(a.confidence * 100).toFixed(0)}%）`)
     const probs = Object.entries(a.probabilities ?? {}).map(([k, v]) => `${k}分:${(v * 100).toFixed(0)}%`).join('  ')
     console.log(`   概率分布：${probs}`)
+    if (a.confidence < 0.6) console.log(`   ⚠ 注意：选档置信度仅 ${(a.confidence * 100).toFixed(0)}%（<60%），仅供参考——建议按上下文重判或问用户`)
     const eff = data.answers?.effort
     if (eff && Number.isFinite(eff.score)) {
       // Score 的加权位置 → 在相邻档位间线性插值，得到档位之间的中间分值
@@ -457,14 +475,20 @@ switch (cmd) {
       const significant = Object.entries(eff.probabilities ?? {})
         .map(([k, v]) => ({ idx: Number(k), v }))
         .filter((x) => x.v >= 0.2)
+      const warnings = []
       if (significant.length > 1 && Math.max(...significant.map((x) => x.idx)) - Math.min(...significant.map((x) => x.idx)) >= 2)
-        console.log('   ⚠ 注意：概率散布在不相邻档位上，Jev 对工作量拿不准，插值仅供参考——建议按上下文重判或问用户')
+        warnings.push('概率散布在不相邻档位上，Jev 对工作量拿不准，插值仅供参考')
       if (eff.confidence < 0.6)
-        console.log(`   ⚠ 注意：工作量判断置信度仅 ${(eff.confidence * 100).toFixed(0)}%（<60%），插值仅供参考——建议重判或问用户`)
+        warnings.push(`工作量判断置信度仅 ${(eff.confidence * 100).toFixed(0)}%（<60%）`)
       const choiceIdx = tiers.indexOf(Number(a.choice))
       if (choiceIdx >= 0 && Math.abs(choiceIdx - eff.score) >= 1)
-        console.log(`   ⚠ 注意：选档（${a.choice} 分）与工作量位置（第 ${eff.score.toFixed(1)} 档）相差 ≥1 档，两项判断冲突——建议重判或问用户`)
-      ok(`Jev 综合建议：${interpolated} 分（选档 ${a.choice} + 位置插值）`)
+        warnings.push(`选档（${a.choice} 分）与工作量位置（第 ${eff.score.toFixed(1)} 档）相差 ≥1 档，两项判断冲突`)
+      if (warnings.length > 0) {
+        for (const w of warnings) console.log(`   ⚠ ${w}——建议按上下文重判或问用户`)
+        console.log(`⚠ Jev 综合建议（存在上述警告，不可直接采用）：${interpolated} 分（选档 ${a.choice} + 位置插值）`)
+      } else {
+        ok(`Jev 综合建议：${interpolated} 分（选档 ${a.choice} + 位置插值）`)
+      }
     } else {
       ok(`Jev 建议：${a.choice} 分`)
     }

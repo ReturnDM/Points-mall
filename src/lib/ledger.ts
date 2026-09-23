@@ -53,27 +53,20 @@ export function recycleValue(paidPoints: number): number {
 export function summarize(entries: LedgerEntry[]): Summary {
   let points = 0
   let exp = 0
-  // 两遍扫描：先收集「券已被消费」的兑换 id —— 与流水读取顺序无关。
-  // 消费 = use/recycle 引用；adjust 全额冲正 redeem_voucher → 券作废（加入消费）；
-  // adjust 全额冲正 use/recycle 记录 → 撤销消费，券回到背包（从消费集中移除）。
-  // 口径必须与 scripts/ledger.mjs 的 summarize 一致。
+  // 与 scripts/ledger.mjs 的 computeConsumed 口径一致：
+  // 券被消费 = 存在「未被全额冲正」的核销/回收记录引用它；
+  // 另外 adjust 全额冲正兑换记录本身 → 券作废。
+  const isFullyReversed = (rec: LedgerEntry) =>
+    entries.some((a) => a.type === 'adjust' && a.ref === rec.id && a.points === -rec.points && a.exp === -rec.exp)
   const consumedRefs = new Set<string>()
   for (const e of entries) {
-    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
-      consumedRefs.add(e.ref)
-      continue
-    }
     if (e.type === 'adjust' && e.ref) {
       const orig = entries.find((x) => x.id === e.ref)
-      if (orig?.type === 'redeem_voucher' && e.points === -orig.points) consumedRefs.add(orig.id)
+      if (orig?.type === 'redeem_voucher' && e.points === -orig.points && e.exp === -orig.exp) consumedRefs.add(orig.id)
     }
   }
-  for (const e of entries) {
-    if (e.type === 'adjust' && e.ref) {
-      const orig = entries.find((x) => x.id === e.ref)
-      if (orig?.ref && (orig?.type === 'use_voucher' || orig?.type === 'recycle_voucher') && e.points === -orig.points && e.exp === -orig.exp)
-        consumedRefs.delete(orig.ref)
-    }
+  for (const c of entries) {
+    if ((c.type === 'use_voucher' || c.type === 'recycle_voucher') && c.ref && !isFullyReversed(c)) consumedRefs.add(c.ref)
   }
   const backpack: LedgerEntry[] = []
   for (const e of entries) {
