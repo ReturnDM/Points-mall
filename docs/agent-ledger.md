@@ -1,6 +1,8 @@
 # Agent 记账规范（最简对话记账路径）
 
-> 已实现为 DSH Skill：`points-ledger`（`~/.dsh/skills/points-ledger/SKILL.md`）。本文件是规则底稿。
+> 已实现为 DSH 项目级 Skill：`.dsh/skills/points-ledger/SKILL.md`。
+> 写入走本地 CLI `scripts/ledger.mjs`（summary / list / earn / adjust / redeem / use / recycle），
+> schema 校验、id 生成、tmp+改名原子写、ref 完整性检查都在 CLI 内固化，Agent 不直接写 JSON。
 
 日常使用 = 跟 Agent 说一句话（「刷了牙」「今天作业很多」），Agent 定档写账并回报。
 
