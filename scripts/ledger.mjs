@@ -327,7 +327,7 @@ switch (cmd) {
   }
   case 'judge': {
     // Jev 定档建议：node scripts/ledger.mjs judge "<事项描述>" [--context "补充上下文"]
-    // 需要环境变量 TYPESAFE_API_KEY（https://console.typesafe.ai/keys）
+    // 双问并行：Choice 选档（可解释 + 分布）+ Score 在档位序列上打位置（概率加权 → 档位间插值）
     const [desc] = rest
     if (!desc) fail('用法：judge "<事项描述>" [--context "补充上下文"]')
     const key = process.env.TYPESAFE_API_KEY
@@ -342,13 +342,14 @@ switch (cmd) {
     try {
       tiers = JSON.parse(readFileSync(tasksPath, 'utf8')).tiers ?? tiers
     } catch { /* 用默认档位 */ }
+    const tierDesc = (t) => `约 ${t} 分：${t <= 10 ? '几分钟的日常小事' : t <= 20 ? '半小时内的事务性工作' : t <= 50 ? '几小时、相当于一次课程作业的工作量' : t <= 100 ? '一整天投入或一个完整功能/成果' : '多天的大工程或重大成果'}`
     const criteria = {}
-    for (const t of tiers) criteria[String(t)] = `约 ${t} 分档：${t <= 10 ? '几分钟的日常小事' : t <= 20 ? '半小时内的事务性工作' : t <= 50 ? '几小时、相当于一次课程作业的工作量' : t <= 100 ? '一整天投入或一个完整功能/成果' : '多天的大工程或重大成果'}`
+    for (const t of tiers) criteria[String(t)] = tierDesc(t)
     const state = [
       `事项：${desc}`,
       opts.context ? `上下文：${opts.context}` : '',
       '这是个人生活游戏化积分系统，按完成事项的工作量给积分（1 积分=一次微小完成，100 积分≈一整天工作量）。',
-      '请从给定档位中选择最匹配的档位。',
+      '档位序列（从小到大）：' + tiers.join(' < ') + ' 分。',
     ].filter(Boolean).join('\n')
     let resp
     try {
@@ -364,6 +365,11 @@ switch (cmd) {
               instructions: '该事项完成应得哪个积分档位？按实际工作量与投入时间判断。',
               criteria,
             },
+            effort: {
+              type: 'score',
+              instructions: `该事项的工作量落在档位序列上的位置。各档位（从第 0 档到第 ${tiers.length - 1} 档）含义如下，按实际投入选最贴切的一档即可，系统会按概率加权折算出档位之间的分值：\n` + tiers.map((t, i) => `第 ${i} 档 = ${tierDesc(t)}`).join('\n'),
+              criteria: tiers.map((t) => tierDesc(t)),
+            },
           },
         }),
       })
@@ -374,9 +380,22 @@ switch (cmd) {
     const data = await resp.json()
     const a = data.answers?.tier
     if (!a) fail('Jev 返回中没有 tier 答案')
-    ok(`Jev 建议档位：${a.choice} 分（置信度 ${(a.confidence * 100).toFixed(0)}%）`)
+    ok(`Jev 选档：${a.choice} 分（置信度 ${(a.confidence * 100).toFixed(0)}%）`)
     const probs = Object.entries(a.probabilities ?? {}).map(([k, v]) => `${k}分:${(v * 100).toFixed(0)}%`).join('  ')
     console.log(`   概率分布：${probs}`)
+    const eff = data.answers?.effort
+    if (eff && Number.isFinite(eff.score)) {
+      // Score 的加权位置 → 在相邻档位间线性插值，得到档位之间的中间分值
+      const i = Math.min(Math.max(eff.score, 0), tiers.length - 1)
+      const lo = Math.floor(i), hi = Math.min(lo + 1, tiers.length - 1)
+      const interpolated = Math.round(tiers[lo] + (tiers[hi] - tiers[lo]) * (i - lo))
+      const effortProbs = Object.entries(eff.probabilities ?? {}).map(([k, v]) => `${tiers[Number(k)]}分:${(v * 100).toFixed(0)}%`).join('  ')
+      console.log(`   工作量位置：${eff.score.toFixed(2)}（介于 ${tiers[lo]} 与 ${tiers[hi]} 分之间）→ 插值 ≈ ${interpolated} 分（置信度 ${(eff.confidence * 100).toFixed(0)}%）`)
+      console.log(`   位置分布：${effortProbs}`)
+      ok(`Jev 综合建议：${interpolated} 分（选档 ${a.choice} + 位置插值）`)
+    } else {
+      ok(`Jev 建议：${a.choice} 分`)
+    }
     console.log('   建议流程：与主模型判断对比，相差 ≤50% 取平均；>50% 重新审计一轮，仍分歧则问用户')
     break
   }
