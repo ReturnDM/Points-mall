@@ -331,7 +331,11 @@ switch (cmd) {
     const [desc] = rest
     if (!desc) fail('用法：judge "<事项描述>" [--context "补充上下文"]')
     const key = process.env.TYPESAFE_API_KEY
-    if (!key) fail('未配置 TYPESAFE_API_KEY 环境变量（从 https://console.typesafe.ai/keys 获取后 setx TYPESAFE_API_KEY <key>）；Jev 复核不可用，可自行定档并在 note 标注')
+      ?? (() => {
+        const f = join(process.env.USERPROFILE ?? process.env.HOME ?? '', '.typesafe-api-key')
+        try { return readFileSync(f, 'utf8').trim() || undefined } catch { return undefined }
+      })()
+    if (!key) fail('未找到 key：设置 TYPESAFE_API_KEY 环境变量，或在 ~/.typesafe-api-key 存放（勿进 git）；Jev 复核不可用时可自行定档并在 note 标注')
     const opts = parseArgs(rest.slice(1))
     const tasksPath = join(dataDir, 'tasks.json')
     let tiers = [5, 10, 20, 50, 100, 200]
