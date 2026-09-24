@@ -223,7 +223,7 @@ function Heatmap({ entries }: { entries: LedgerEntry[] }) {
   end.setDate(end.getDate() + (7 - ((end.getDay() + 6) % 7) - 1)) // 推到本周日
   const start = new Date(end)
   start.setDate(start.getDate() - (WEEKS * 7 - 1))
-  const levelOfDay = (pts: number | undefined) => (pts === undefined ? 0 : pts >= 50 ? 4 : pts >= 20 ? 3 : pts >= 10 ? 2 : 1)
+  const levelOfDay = (pts: number | undefined) => (pts === undefined ? 0 : pts >= 200 ? 4 : pts >= 100 ? 3 : pts >= 50 ? 2 : pts >= 10 ? 1 : 0)
 
   const columns: { date: Date; pts?: number }[][] = []
   const monthLabels: { col: number; label: string }[] = []
@@ -268,7 +268,7 @@ function Heatmap({ entries }: { entries: LedgerEntry[] }) {
 
   return (
     <section aria-label="活跃度">
-      <SectionTitle sub="每天加分越多，颜色越红（档位阈值 5 / 10 / 20 / 50）">活跃度</SectionTitle>
+      <SectionTitle sub="每天加分越多，颜色越红（档位阈值 10 / 50 / 100 / 200）">活跃度</SectionTitle>
       <Card className="p-6 overflow-x-auto">
         <div className="flex gap-2 min-w-[640px]">
           <div className="flex flex-col justify-between text-xs opacity-50 py-0.5 shrink-0">
