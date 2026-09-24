@@ -4,7 +4,7 @@
 
 ## 数据接口
 
-- **数据目录**：环境变量 `POINTS_DATA_DIR` → 项目根 `config.local.json` 的 `dataDir`；都没有就停下让用户配置，不猜路径。当前为 `D:\Nutstore\积分商城数据`。
+- **数据目录**：环境变量 `POINTS_DATA_DIR` → 项目根 `config.local.json` 的 `dataDir`；都没有就停下让用户配置，不猜路径。真实路径看 `config.local.json`（不入 git）。
 - **规则权威文档**：`docs/schema.md`（数据 schema）与 `docs/agent-ledger.md`（Agent 记账规范），冲突时以 schema.md 为准。
 - **写账前必读**：`tasks.json`（档位与常见事项分值）、`shop.json`（商品）、`积分规则.md`（专项细则）。
 

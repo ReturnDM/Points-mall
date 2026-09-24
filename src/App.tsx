@@ -3,7 +3,6 @@ import { FolderOpen, RefreshCw, Coins, Star, Package, PencilRuler, AlertTriangle
 import type { DataBundle, LedgerEntry, ShopItem } from './lib/types'
 import { readBundle, loadDirHandle, saveDirHandle, ensurePermission, fsAccessSupported } from './lib/fsdata'
 import { summarize, sortEntries, recycleValue, yuanToPoints } from './lib/ledger'
-import { loadDemoBundle } from './lib/demo'
 import { Card, WobblyButton, StickyTag, SectionTitle } from './ui'
 
 export default function App() {
@@ -42,11 +41,6 @@ export default function App() {
 
   useEffect(() => {
     ;(async () => {
-      if (new URLSearchParams(location.search).has('demo')) {
-        setBundle(await loadDemoBundle())
-        setStatus('ready')
-        return
-      }
       const dir = await loadDirHandle()
       if (dir && (await ensurePermission(dir))) await load(dir)
     })()
