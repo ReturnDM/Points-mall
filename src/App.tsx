@@ -89,6 +89,7 @@ export default function App() {
           ) : (
             <>
               <Dashboard points={summary.points} exp={summary.exp} level={summary.level} backpackCount={summary.backpack.length} rate={bundle.rate} />
+              <Heatmap entries={bundle.entries} />
               <Tasks pricing={bundle.pricing} />
               <Shop shop={bundle.shop} points={summary.points} rate={bundle.rate} />
               <Backpack backpack={summary.backpack} />
@@ -200,6 +201,123 @@ function Dashboard({ points, exp, level, backpackCount, rate }: { points: number
         </Card>
       </div>
       <p className="mt-4 text-center text-sm opacity-50">累计经验 {exp}（只增不减，花积分不掉级）</p>
+    </section>
+  )
+}
+
+function Heatmap({ entries }: { entries: LedgerEntry[] }) {
+  const WEEKS = 26
+  // 每日加分 = 当天所有正向流水的 points 之和（earn + 正向 adjust）
+  const daily = new Map<string, number>()
+  for (const e of entries) {
+    if (e.points <= 0) continue
+    const d = new Date(e.time)
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    daily.set(key, (daily.get(key) ?? 0) + e.points)
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  // 结束于本周，起点对齐到周一，共 WEEKS 列
+  const end = new Date(today)
+  end.setDate(end.getDate() + (7 - ((end.getDay() + 6) % 7) - 1)) // 推到本周日
+  const start = new Date(end)
+  start.setDate(start.getDate() - (WEEKS * 7 - 1))
+  const levelOfDay = (pts: number | undefined) => (pts === undefined ? 0 : pts >= 50 ? 4 : pts >= 20 ? 3 : pts >= 10 ? 2 : 1)
+
+  const columns: { date: Date; pts?: number }[][] = []
+  const monthLabels: { col: number; label: string }[] = []
+  let lastMonth = -1
+  for (let w = 0; w < WEEKS; w++) {
+    const col: { date: Date; pts?: number }[] = []
+    for (let d = 0; d < 7; d++) {
+      const date = new Date(start)
+      date.setDate(start.getDate() + w * 7 + d)
+      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      col.push({ date, pts: daily.get(key) })
+    }
+    if (col[0].date.getMonth() !== lastMonth) {
+      lastMonth = col[0].date.getMonth()
+      if (w > 0 || col[0].date.getDate() <= 7) monthLabels.push({ col: w, label: `${lastMonth + 1}月` })
+    }
+    columns.push(col)
+  }
+
+  // 统计：本周加分、连续天数（截至今天或昨天都算延续）、最高单日
+  const monday = new Date(today)
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
+  const weekKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  let weekPoints = 0
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(monday)
+    d.setDate(monday.getDate() + i)
+    weekPoints += daily.get(weekKey(d)) ?? 0
+  }
+  let streak = 0
+  const cur = new Date(today)
+  if (!daily.has(weekKey(cur))) cur.setDate(cur.getDate() - 1) // 今天还没记则从昨天起算
+  while (daily.has(weekKey(cur))) {
+    streak++
+    cur.setDate(cur.getDate() - 1)
+  }
+  let maxDay = 0
+  for (const v of daily.values()) maxDay = Math.max(maxDay, v)
+
+  const levelClass = ['bg-muted/60', 'bg-accent/25', 'bg-accent/45', 'bg-accent/70', 'bg-accent']
+  const dayNames = ['一', '二', '三', '四', '五', '六', '日']
+
+  return (
+    <section aria-label="活跃度">
+      <SectionTitle sub="每天加分越多，颜色越红（档位阈值 5 / 10 / 20 / 50）">活跃度</SectionTitle>
+      <Card className="p-6 overflow-x-auto">
+        <div className="flex gap-2 min-w-[640px]">
+          <div className="flex flex-col justify-between text-xs opacity-50 py-0.5 shrink-0">
+            {dayNames.map((d, i) => (
+              <span key={d} className={i % 2 === 0 ? '' : 'invisible'} style={{ height: 18, lineHeight: '18px' }}>{d}</span>
+            ))}
+          </div>
+          <div>
+            <div className="relative h-5 mb-1 text-xs opacity-50">
+              {monthLabels.map((m) => (
+                <span key={m.col} className="absolute" style={{ left: m.col * 22 }}>{m.label}</span>
+              ))}
+            </div>
+            <div className="flex gap-[4px]">
+              {columns.map((col, ci) => (
+                <div key={ci} className="flex flex-col gap-[4px]">
+                  {col.map(({ date, pts }) => {
+                    const lvl = levelOfDay(pts)
+                    const isToday = date.getTime() === today.getTime()
+                    const future = date > today
+                    return (
+                      <div
+                        key={date.toISOString()}
+                        title={`${date.toLocaleDateString('zh-CN')}${pts ? `：+${pts} 分` : future ? '' : '：未记分'}`}
+                        className={`w-[18px] h-[18px] border ${future ? 'border-ink/10' : 'border-ink/25'} ${
+                          future ? 'bg-transparent' : levelClass[lvl]
+                        } ${isToday ? 'ring-2 ring-pen/60' : ''} hover:scale-125 transition-transform`}
+                        style={{ borderRadius: '25px 10px 20px 10px / 10px 20px 10px 25px' }}
+                      />
+                    )
+                  })}
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center justify-between text-xs opacity-60 flex-wrap gap-2">
+              <span>
+                本周 +{weekPoints} 分 · 连续 {streak} 天 · 最高单日 +{maxDay} 分
+              </span>
+              <span className="flex items-center gap-1">
+                少
+                {levelClass.map((c, i) => (
+                  <span key={i} className={`inline-block w-[14px] h-[14px] border border-ink/25 ${c}`} style={{ borderRadius: '25px 10px 20px 10px / 10px 20px 10px 25px' }} />
+                ))}
+                多
+              </span>
+            </div>
+          </div>
+        </div>
+      </Card>
     </section>
   )
 }
