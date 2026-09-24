@@ -1,4 +1,5 @@
 import type { DataBundle, LedgerEntry, ShopItem, TaskPricing } from './types'
+import { entryErrors } from '../../shared/entry-schema.mjs'
 
 /**
  * 浏览器端数据读取：File System Access API 选择/授权坚果云数据目录（只读）。
@@ -67,10 +68,12 @@ async function collectLedger(ledgerDir: DirHandle, warnings: string[]): Promise<
         out.push(...(await collectLedger(handle, warnings)))
       } else if (name.endsWith('.json') && !name.endsWith('.tmp')) {
         const data = (await readJson(await handle.getFile!())) as LedgerEntry
-        if (data && typeof data.id === 'string' && typeof data.points === 'number') {
-          out.push(data)
+        // 与 CLI 共用同一套字段校验（shared/entry-schema.mjs）：CLI 拒绝的坏数据前端也不汇总，避免余额/等级出 NaN
+        const errs = entryErrors(data)
+        if (errs.length > 0) {
+          warnings.push(`流水文件校验失败 ledger/${name}：${errs.join('；')}`)
         } else {
-          warnings.push(`流水文件格式异常：ledger/${name}`)
+          out.push(data)
         }
       }
     } catch (err) {

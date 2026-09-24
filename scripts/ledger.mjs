@@ -9,15 +9,17 @@
  *   node scripts/ledger.mjs earn <title> <points> [--note "..."]
  *   node scripts/ledger.mjs adjust --ref <id> [--points Δ] [--exp Δ] [--title "..."] [--note "..."]
  *                                        # 不带 Δ 则全额冲正（每条记录只能全额冲正一次）
+ *                                        # 累计更正（正反两向）不得超过原记录的绝对值，防超冲/虚增
  *   node scripts/ledger.mjs redeem <itemId> [--note "..."]   # 兑换（查 shop.json 定价，余额不足拒绝）
  *   node scripts/ledger.mjs use <redeemId> [--note "..."]    # 核销虚拟券
  *   node scripts/ledger.mjs recycle <redeemId> [--note "..."] # 回收（返还原实付 80%）
  *   node scripts/ledger.mjs doctor                       # 账本自检：坏流水/重复id/无效ref/重复核销
  *   node scripts/ledger.mjs judge "<事项描述>" [--context "..."]  # Jev 定档建议（需 TYPESAFE_API_KEY）
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { VALID_TYPES, entryErrors } from '../shared/entry-schema.mjs'
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DEFAULT_RATE = 20
@@ -77,6 +79,39 @@ function writeEntry(dataDir, entry) {
   return final
 }
 
+// ---------- 写锁：防止并发写账（如两个 Agent 同时 redeem 把余额刷负） ----------
+const LOCK_NAME = '.ledger.lock'
+const LOCK_STALE_MS = 30_000
+let heldLockPath = null
+// 进程退出（含 fail 的 process.exit）时尽力释放锁；残留的锁靠超时抢占兜底
+process.on('exit', () => { if (heldLockPath) { try { unlinkSync(heldLockPath) } catch { /* 已被抢占则忽略 */ } } })
+
+/** 获取数据目录级写锁；返回释放函数。抢不到则 fail。 */
+function acquireLock(dataDir) {
+  const lock = join(dataDir, LOCK_NAME)
+  const deadline = Date.now() + 5000
+  while (true) {
+    try {
+      const fd = openSync(lock, 'wx')
+      closeSync(fd)
+      heldLockPath = lock
+      return () => { try { unlinkSync(lock) } catch { /* 忽略 */ } heldLockPath = null }
+    } catch (err) {
+      if (err.code !== 'EEXIST') fail(`无法创建写锁 ${lock}：${err.message}`)
+      // 陈旧锁（持有者崩溃残留）超时后抢占
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          console.error(`⚠ 写锁已陈旧（>${LOCK_STALE_MS / 1000}s），强制抢占：${lock}`)
+          unlinkSync(lock)
+          continue
+        }
+      } catch { /* 锁刚好被释放，重试 */ }
+      if (Date.now() > deadline) fail('获取写锁超时（5s）：另一笔写账正在进行或锁文件残留，稍后重试')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100) // sleep 100ms
+    }
+  }
+}
+
 /** 递归读取全部流水（兼容平铺与按年-月等任意层级子目录）。
  *  返回 { entries, bad }；bad = 坏文件清单，写账命令必须据此拒绝写入。 */
 function readLedgerEx(dataDir) {
@@ -94,14 +129,9 @@ function readLedgerEx(dataDir) {
       } else if (name.endsWith('.json') && !name.endsWith('.tmp')) {
         try {
           const e = JSON.parse(readFileSync(full, 'utf8'))
-          // 字段级校验：通过的才进 entries（summary 也不会再被坏数据污染出 NaN）
-          const errs = []
-          for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
-            if (e[k] === undefined) errs.push(`缺少字段 ${k}`)
-          if (!Number.isFinite(e.points) || !Number.isFinite(e.exp))
-            errs.push(`points/exp 不是有限数字（${JSON.stringify([e.points, e.exp])}）`)
-          if (e.type && !VALID_TYPES.has(e.type)) errs.push(`未知类型 ${e.type}`)
-          if (e.time && Number.isNaN(Date.parse(e.time))) errs.push('time 不是合法时间')
+          // 字段级校验（口径在 shared/entry-schema.mjs，与前端共用）：
+          // 通过的才进 entries（summary 也不会再被坏数据污染出 NaN）
+          const errs = entryErrors(e)
           if (errs.length > 0) invalid.push(`ledger/${relName}: ${errs.join('；')}`)
           else entries.push(e)
         } catch (err) { bad.push(`ledger/${relName}: ${err.message}`) }
@@ -163,7 +193,6 @@ function levelFromExp(exp) {
   while (rest >= need) { rest -= need; lv++; need = EXP_FOR(lv) }
   return { level: lv, expInLevel: rest, expToNext: need - rest, expRequired: need }
 }
-const VALID_TYPES = new Set(['earn', 'redeem_physical', 'redeem_voucher', 'use_voucher', 'recycle_voucher', 'adjust'])
 
 function summarize(entries) {
   let points = 0, exp = 0
@@ -233,7 +262,8 @@ switch (cmd) {
   }
   case 'list': {
     const opts = parseArgs(rest)
-    let entries = readLedger(dataDir).sort((a, b) => (a.time < b.time ? 1 : -1))
+    // 用 Date.parse 排序：time 的时区 offset 可能不同，字符串比较会排错；同秒并列时按 id 稳定排序
+    let entries = readLedger(dataDir).sort((a, b) => (Date.parse(b.time) - Date.parse(a.time)) || b.id.localeCompare(a.id))
     if (opts.type) entries = entries.filter((e) => e.type === opts.type)
     const limit = Number(opts.limit ?? 20)
     for (const e of entries.slice(0, limit))
@@ -246,48 +276,61 @@ switch (cmd) {
     if (!title || !Number.isFinite(Number(pointsStr))) fail('用法：earn <title> <points> [--note "..."]')
     const pts = Number(pointsStr)
     if (pts <= 0) fail('earn 的积分必须为正数；冲正请用 adjust --ref')
-    readLedgerStrict(dataDir)
     const opts = parseArgs(rest.slice(2))
-    const entry = mkEntry('earn', title, pts, pts, opts.note ? { note: String(opts.note) } : {})
-    writeEntry(dataDir, entry)
-    ok(`记账成功：${title} +${pts} 分（+${pts} 经验）`)
+    const release = acquireLock(dataDir)
+    try {
+      readLedgerStrict(dataDir)
+      const entry = mkEntry('earn', title, pts, pts, opts.note ? { note: String(opts.note) } : {})
+      writeEntry(dataDir, entry)
+      ok(`记账成功：${title} +${pts} 分（+${pts} 经验）`)
+    } finally { release() }
     reportSummary(readLedger(dataDir))
     break
   }
   case 'adjust': {
     const opts = parseArgs(rest)
     if (!opts.ref) fail('用法：adjust --ref <id> [--points Δ] [--exp Δ] [--title "..."] [--note "..."]；不带 Δ 则全额冲正')
-    const entries = readLedgerStrict(dataDir)
-    const orig = findEntry(entries, opts.ref)
     const fullReverse = opts.points === undefined && opts.exp === undefined
-    const dPoints = fullReverse ? -orig.points : Number(opts.points ?? 0)
-    const dExp = fullReverse ? -orig.exp : Number(opts.exp ?? 0)
-    if (!Number.isFinite(dPoints) || !Number.isFinite(dExp)) fail('--points / --exp 必须是数字')
-    // 零值记录（核销 0/0）的冲正 = 撤销核销，语义在券状态里，不适用积分防重
-    const zeroOrig = orig.points === 0 && orig.exp === 0
-    if (fullReverse && !zeroOrig && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
-      fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
-    // 按累计冲正金额防重：累计不得达到或超过原记录全额（零值记录除外）
-    const adjSum = entries.reduce((s, x) => (x.type === 'adjust' && x.ref === orig.id ? { p: s.p + x.points, e: s.e + x.exp } : s), { p: 0, e: 0 })
-    if (!zeroOrig) {
-      const fullyOffsetBefore = adjSum.p === -orig.points && adjSum.e === -orig.exp
-      // 超冲：冲正后累计越过原记录的反向全额（如 +50 的账已冲 -20 再冲 -40）
-      const overP = orig.points >= 0 ? adjSum.p + dPoints < -orig.points : adjSum.p + dPoints > -orig.points
-      const overE = orig.exp >= 0 ? adjSum.e + dExp < -orig.exp : adjSum.e + dExp > -orig.exp
-      if (fullyOffsetBefore || overP || overE)
-        fail(`记录 ${orig.id} 的累计冲正将越过全额（已冲 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验，本次再冲 ${dPoints >= 0 ? '+' : ''}${dPoints} / ${dExp >= 0 ? '+' : ''}${dExp}）；最大可冲至 ${-orig.points} 分 / ${-orig.exp} 经验`)
-    }
-    if (orig.type === 'redeem_voucher') {
-      const consumed = computeConsumed(entries)
-      if (consumed.has(orig.id) && dPoints > 0)
-        fail(`券 ${orig.id} 已被有效核销/回收，冲正原兑换会重复返分。如需撤销消费，请对对应的使用/回收记录做 adjust 冲正`)
-    }
-    const entry = mkEntry('adjust', String(opts.title ?? `冲正：${orig.title}`), dPoints, dExp, {
-      ref: orig.id,
-      ...(opts.note ? { note: String(opts.note) } : { note: fullReverse ? `全额冲正 ${orig.id}` : `更正 ${orig.id}` }),
-    })
-    writeEntry(dataDir, entry)
-    ok(`更正成功（${fullReverse ? '全额冲正' : '差额更正'} ${orig.id}）：积分 ${dPoints >= 0 ? '+' : ''}${dPoints}，经验 ${dExp >= 0 ? '+' : ''}${dExp}`)
+    const dPoints0 = fullReverse ? 0 : Number(opts.points ?? 0)
+    const dExp0 = fullReverse ? 0 : Number(opts.exp ?? 0)
+    if (!fullReverse && (!Number.isFinite(dPoints0) || !Number.isFinite(dExp0))) fail('--points / --exp 必须是数字')
+    const release = acquireLock(dataDir)
+    try {
+      const entries = readLedgerStrict(dataDir)
+      const orig = findEntry(entries, opts.ref)
+      const dPoints = fullReverse ? -orig.points : dPoints0
+      const dExp = fullReverse ? -orig.exp : dExp0
+      // 零值记录（核销 0/0）的冲正 = 撤销核销，语义在券状态里，不适用积分防重
+      const zeroOrig = orig.points === 0 && orig.exp === 0
+      if (fullReverse && !zeroOrig && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
+        fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
+      // 按累计冲正金额防重：正反两个方向的累计都不得越过原记录的绝对值（零值记录除外）
+      const adjSum = entries.reduce((s, x) => (x.type === 'adjust' && x.ref === orig.id ? { p: s.p + x.points, e: s.e + x.exp } : s), { p: 0, e: 0 })
+      if (!zeroOrig) {
+        const fullyOffsetBefore = adjSum.p === -orig.points && adjSum.e === -orig.exp
+        // 超冲：冲正后累计越过原记录的反向全额（如 +50 的账已冲 -20 再冲 -40）
+        const overP = orig.points >= 0 ? adjSum.p + dPoints < -orig.points : adjSum.p + dPoints > -orig.points
+        const overE = orig.exp >= 0 ? adjSum.e + dExp < -orig.exp : adjSum.e + dExp > -orig.exp
+        // 正向防虚增：累计正向更正不得超过原额（补记最多把该记录翻倍；对兑换记录即退款不超过实付）
+        const overPosP = adjSum.p + dPoints > Math.abs(orig.points)
+        const overPosE = adjSum.e + dExp > Math.abs(orig.exp)
+        if (fullyOffsetBefore || overP || overE)
+          fail(`记录 ${orig.id} 的累计冲正将越过全额（已冲 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验，本次再冲 ${dPoints >= 0 ? '+' : ''}${dPoints} / ${dExp >= 0 ? '+' : ''}${dExp}）；最大可冲至 ${-orig.points} 分 / ${-orig.exp} 经验`)
+        if (overPosP || overPosE)
+          fail(`记录 ${orig.id} 的累计正向更正将超过原额（已累计 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验，本次再 +${dPoints} / +${dExp}）；正向补记上限为 +${Math.abs(orig.points)} 分 / +${Math.abs(orig.exp)} 经验。确属大额漏记请另记一笔新的 earn`)
+      }
+      if (orig.type === 'redeem_voucher') {
+        const consumed = computeConsumed(entries)
+        if (consumed.has(orig.id) && dPoints > 0)
+          fail(`券 ${orig.id} 已被有效核销/回收，冲正原兑换会重复返分。如需撤销消费，请对对应的使用/回收记录做 adjust 冲正`)
+      }
+      const entry = mkEntry('adjust', String(opts.title ?? `冲正：${orig.title}`), dPoints, dExp, {
+        ref: orig.id,
+        ...(opts.note ? { note: String(opts.note) } : { note: fullReverse ? `全额冲正 ${orig.id}` : `更正 ${orig.id}` }),
+      })
+      writeEntry(dataDir, entry)
+      ok(`更正成功（${fullReverse ? '全额冲正' : '差额更正'} ${orig.id}）：积分 ${dPoints >= 0 ? '+' : ''}${dPoints}，经验 ${dExp >= 0 ? '+' : ''}${dExp}`)
+    } finally { release() }
     reportSummary(readLedger(dataDir))
     break
   }
@@ -308,11 +351,14 @@ switch (cmd) {
       price = Math.ceil(item.yuan * rate)
       extra = { rate, note: `实物兑换 ¥${item.yuan} × ${rate}${note ? '；' + note : ''}` }
     }
-    const balance = summarize(readLedgerStrict(dataDir)).points
-    if (balance < price) fail(`余额不足：当前 ${balance} 分，兑换 ${item.name} 需要 ${price} 分（还差 ${price - balance} 分）`)
-    const entry = mkEntry(item.type === 'voucher' ? 'redeem_voucher' : 'redeem_physical', item.name, -price, 0, extra)
-    writeEntry(dataDir, entry)
-    ok(`兑换成功：${item.name} −${price} 分${item.type === 'voucher' ? '（券已入背包，用 use 核销 / recycle 回收）' : ''}`)
+    const release = acquireLock(dataDir)
+    try {
+      const balance = summarize(readLedgerStrict(dataDir)).points
+      if (balance < price) fail(`余额不足：当前 ${balance} 分，兑换 ${item.name} 需要 ${price} 分（还差 ${price - balance} 分）`)
+      const entry = mkEntry(item.type === 'voucher' ? 'redeem_voucher' : 'redeem_physical', item.name, -price, 0, extra)
+      writeEntry(dataDir, entry)
+      ok(`兑换成功：${item.name} −${price} 分${item.type === 'voucher' ? '（券已入背包，用 use 核销 / recycle 回收）' : ''}`)
+    } finally { release() }
     reportSummary(readLedger(dataDir))
     break
   }
@@ -320,17 +366,20 @@ switch (cmd) {
   case 'recycle': {
     const [id] = rest
     if (!id) fail(`用法：${cmd} <redeemId> [--note "..."]`)
-    const entries = readLedgerStrict(dataDir)
-    const orig = ensureVoucherActive(entries, id)
     const opts = parseArgs(rest.slice(1))
-    if (cmd === 'use') {
-      writeEntry(dataDir, mkEntry('use_voucher', `核销：${orig.title}`, 0, 0, { ref: orig.id, ...(opts.note ? { note: String(opts.note) } : {}) }))
-      ok(`核销成功：${orig.title}（不扣积分）`)
-    } else {
-      const back = Math.floor(-orig.points * 0.8)
-      writeEntry(dataDir, mkEntry('recycle_voucher', `回收：${orig.title}`, back, 0, { ref: orig.id, note: `原实付 ${-orig.points} 分 × 80%${opts.note ? '；' + opts.note : ''}` }))
-      ok(`回收成功：${orig.title} +${back} 分（原实付 ${-orig.points} × 80%，不加经验）`)
-    }
+    const release = acquireLock(dataDir)
+    try {
+      const entries = readLedgerStrict(dataDir)
+      const orig = ensureVoucherActive(entries, id)
+      if (cmd === 'use') {
+        writeEntry(dataDir, mkEntry('use_voucher', `核销：${orig.title}`, 0, 0, { ref: orig.id, ...(opts.note ? { note: String(opts.note) } : {}) }))
+        ok(`核销成功：${orig.title}（不扣积分）`)
+      } else {
+        const back = Math.floor(-orig.points * 0.8)
+        writeEntry(dataDir, mkEntry('recycle_voucher', `回收：${orig.title}`, back, 0, { ref: orig.id, note: `原实付 ${-orig.points} 分 × 80%${opts.note ? '；' + opts.note : ''}` }))
+        ok(`回收成功：${orig.title} +${back} 分（原实付 ${-orig.points} × 80%，不加经验）`)
+      }
+    } finally { release() }
     reportSummary(readLedger(dataDir))
     break
   }
@@ -386,6 +435,20 @@ switch (cmd) {
       }
     }
     for (const [ref, n] of reverseCount) if (n > 1) problems.push(`记录 ${ref} 被全额冲正了 ${n} 次`)
+    // 累计 adjust 超过原记录绝对值（反向 = 超冲，正向 = 虚增）——CLI 写入时已拦截，此处查历史/手工数据
+    const adjTotals = new Map()
+    for (const e of entries) {
+      if (e.type !== 'adjust' || !e.ref) continue
+      const t = adjTotals.get(e.ref) ?? { p: 0, e: 0 }
+      t.p += e.points; t.e += e.exp
+      adjTotals.set(e.ref, t)
+    }
+    for (const [ref, t] of adjTotals) {
+      const orig = entries.find((x) => x.id === ref)
+      if (!orig || (orig.points === 0 && orig.exp === 0)) continue
+      if (Math.abs(t.p) > Math.abs(orig.points) || Math.abs(t.e) > Math.abs(orig.exp))
+        problems.push(`记录 ${ref} 的累计 adjust（${t.p >= 0 ? '+' : ''}${t.p} 分 / ${t.e >= 0 ? '+' : ''}${t.e} 经验）超过原额（±${Math.abs(orig.points)} / ±${Math.abs(orig.exp)}）`)
+    }
     // 已被「有效」消费的券又被冲正返分（重复返分）——口径同 computeConsumed
     const consumedActive = computeConsumed(entries)
     for (const e of entries) {

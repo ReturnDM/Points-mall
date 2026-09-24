@@ -430,8 +430,11 @@ function Shop({ shop, points, rate }: { shop: ShopItem[]; points: number; rate: 
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
           {shop.map((item, i) => {
-            const price = item.type === 'voucher' ? (item.points ?? 0) : yuanToPoints(item.yuan ?? 0, rate)
-            const affordable = points >= price
+            const price = item.type === 'voucher' ? item.points : yuanToPoints(item.yuan ?? 0, rate)
+            const priceBad = item.type === 'voucher'
+              ? !Number.isFinite(price) || (price as number) <= 0
+              : !Number.isFinite(item.yuan) || (item.yuan ?? 0) <= 0
+            const affordable = !priceBad && points >= (price as number)
             return (
               <Card
                 key={item.id}
@@ -443,15 +446,21 @@ function Shop({ shop, points, rate }: { shop: ShopItem[]; points: number; rate: 
                 <h3 className="text-xl font-bold">{item.name}</h3>
                 {item.desc && <p className="mt-1 text-sm opacity-60">{item.desc}</p>}
                 <div className="mt-4 flex items-center justify-between">
-                  <span className="text-2xl font-bold text-accent">{price} 分</span>
-                  {item.type === 'physical' && item.yuan != null && (
-                    <span className="text-xs opacity-50">¥{item.yuan} × {rate}</span>
+                  {priceBad ? (
+                    <span className="text-sm text-accent">定价异常（请修 shop.json）</span>
+                  ) : (
+                    <>
+                      <span className="text-2xl font-bold text-accent">{price} 分</span>
+                      {item.type === 'physical' && item.yuan != null && (
+                        <span className="text-xs opacity-50">¥{item.yuan} × {rate}</span>
+                      )}
+                    </>
                   )}
                 </div>
-                {!affordable && <p className="mt-2 text-sm text-pen">还差 {price - points} 分</p>}
-                {item.type === 'voucher' && (
+                {!priceBad && !affordable && <p className="mt-2 text-sm text-pen">还差 {(price as number) - points} 分</p>}
+                {item.type === 'voucher' && !priceBad && (
                   <p className="mt-2 text-xs opacity-50 border-t border-dashed border-ink/30 pt-2">
-                    兑换后入背包 · 未核销可回收 {recycleValue(price)} 分
+                    兑换后入背包 · 未核销可回收 {recycleValue(price as number)} 分
                   </p>
                 )}
               </Card>

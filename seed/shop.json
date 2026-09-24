@@ -1,10 +1,10 @@
 {
   "items": [
-    { "id": "lazy-morning", "name": "赖床券", "type": "voucher", "points": 30, "desc": "授权自己睡个懒觉", "emoji": "🛏️" },
-    { "id": "slacker", "name": "摆烂券", "type": "voucher", "points": 50, "desc": "理直气壮摆烂半天", "emoji": "🛋️" },
-    { "id": "game-night", "name": "通宵游戏券", "type": "voucher", "points": 80, "desc": "一晚完全属于自己", "emoji": "🎮" },
-    { "id": "milk-tea", "name": "奶茶一杯", "type": "physical", "yuan": 15, "desc": "实例兑换，20 分 = 1 元", "emoji": "🧋" },
-    { "id": "movie", "name": "电影票一张", "type": "physical", "yuan": 40, "emoji": "🎬" },
-    { "id": "game-topup", "name": "游戏充值 ¥50", "type": "physical", "yuan": 50, "emoji": "🕹️" }
+    { "id": "lazy-morning", "name": "赖床券", "type": "voucher", "points": 150, "desc": "授权自己睡个懒觉", "emoji": "🛏️" },
+    { "id": "slacker", "name": "摆烂券", "type": "voucher", "points": 250, "desc": "理直气壮摆烂半天", "emoji": "🛋️" },
+    { "id": "game-night", "name": "通宵游戏券", "type": "voucher", "points": 400, "desc": "一晚完全属于自己", "emoji": "🎮" },
+    { "id": "mouse-pro", "name": "电竞鼠标", "type": "physical", "yuan": 300, "desc": "示例：中额愿望目标（按 config.json 汇率折算）", "emoji": "🖱️" },
+    { "id": "kb-dream", "name": "客制化机械键盘", "type": "physical", "yuan": 500, "desc": "示例：大额愿望目标", "emoji": "⌨️" },
+    { "id": "monitor-27", "name": "27 寸高刷显示器", "type": "physical", "yuan": 1500, "desc": "示例：终极愿望目标", "emoji": "🖥️" }
   ]
 }

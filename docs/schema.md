@@ -48,7 +48,14 @@
 
 - 实物标价：`ceil(人民币 × 20)`（首月 20 分 = 1 元试行；调价不追溯历史流水）。
 - 改账**不覆盖**历史：写一条新的 `adjust` 记录关联原记录；错误奖励的冲正同时修正积分和经验。
+- `adjust` 防重：同一原记录的**累计更正（正反两向）不得超过原记录的绝对值**——反向防超冲（多返分），正向防虚增（无限加分）；确属大额漏记请另记一笔新的 `earn`。零值记录（核销 0/0）例外，用于撤销核销语义。
 - 背包 = 所有未被 `use_voucher` / `recycle_voucher` 引用核销的 `redeem_voucher` 记录。
+
+## CLI 命令（`node scripts/ledger.mjs`）
+
+- `doctor`：账本自检——坏流水 / 重复 id / 无效 ref / 重复核销 / 重复全额冲正 / 累计 adjust 超原额。发现异常时优先跑它。
+- `judge "<事项描述>" [--context "..."]`：Jev 定档建议（需 TYPESAFE_API_KEY 或 `~/.typesafe-api-key`），输出选档、概率分布与工作量插值，含低置信度警告。
+- 所有写账命令（earn / adjust / redeem / use / recycle）持有数据目录级写锁（`.ledger.lock`，陈旧锁 30s 后自动抢占），防止并发写账把余额刷负。
 
 ## tasks.json
 
