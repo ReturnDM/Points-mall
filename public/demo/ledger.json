@@ -1,12 +1,91 @@
 [
-  { "id": "demo-01", "time": "2026-02-05T08:00:00+08:00", "type": "earn", "title": "刷牙", "points": 5, "exp": 5, "note": "示例" },
-  { "id": "demo-02", "time": "2026-02-05T14:00:00+08:00", "type": "earn", "title": "上课", "points": 10, "exp": 10 },
-  { "id": "demo-03", "time": "2026-02-05T21:00:00+08:00", "type": "earn", "title": "课程作业：高数周练", "points": 50, "exp": 50, "note": "工作量约 3 小时" },
-  { "id": "demo-04", "time": "2026-02-06T09:00:00+08:00", "type": "earn", "title": "DSH 更新", "points": 20, "exp": 20 },
-  { "id": "demo-05", "time": "2026-02-06T10:00:00+08:00", "type": "earn", "title": "Git 项目维护", "points": 50, "exp": 50, "note": "修了一个 CI 问题" },
-  { "id": "demo-06", "time": "2026-02-06T12:00:00+08:00", "type": "redeem_voucher", "title": "赖床券", "points": -30, "exp": 0, "note": "周末用" },
-  { "id": "demo-07", "time": "2026-02-06T12:10:00+08:00", "type": "redeem_physical", "title": "可乐一瓶", "points": -60, "exp": 0, "rate": 20, "note": "¥3 × 20" },
-  { "id": "demo-08", "time": "2026-02-07T09:00:00+08:00", "type": "earn", "title": "刷牙", "points": 5, "exp": 5 },
-  { "id": "demo-09", "time": "2026-02-07T20:00:00+08:00", "type": "use_voucher", "title": "赖床券核销", "points": 0, "exp": 0, "ref": "demo-06" },
-  { "id": "demo-10", "time": "2026-02-07T21:00:00+08:00", "type": "adjust", "title": "冲正：上课记重了", "points": -10, "exp": -10, "ref": "demo-02", "note": "2/5 只有一节课" }
+  {
+    "id": "demo-01",
+    "time": "2026-09-18T10:20:48+08:00",
+    "type": "earn",
+    "title": "刷牙",
+    "points": 5,
+    "exp": 5,
+    "note": "示例"
+  },
+  {
+    "id": "demo-02",
+    "time": "2026-09-18T10:20:48+08:00",
+    "type": "earn",
+    "title": "上课",
+    "points": 10,
+    "exp": 10
+  },
+  {
+    "id": "demo-03",
+    "time": "2026-09-18T10:20:48+08:00",
+    "type": "earn",
+    "title": "课程作业：高数周练",
+    "points": 50,
+    "exp": 50,
+    "note": "工作量约 3 小时"
+  },
+  {
+    "id": "demo-04",
+    "time": "2026-09-21T10:20:48+08:00",
+    "type": "earn",
+    "title": "DSH 更新",
+    "points": 20,
+    "exp": 20
+  },
+  {
+    "id": "demo-05",
+    "time": "2026-09-21T10:20:48+08:00",
+    "type": "earn",
+    "title": "Git 项目维护",
+    "points": 50,
+    "exp": 50,
+    "note": "修了一个 CI 问题"
+  },
+  {
+    "id": "demo-06",
+    "time": "2026-09-21T10:20:48+08:00",
+    "type": "redeem_voucher",
+    "title": "赖床券",
+    "points": -30,
+    "exp": 0,
+    "note": "周末用"
+  },
+  {
+    "id": "demo-07",
+    "time": "2026-09-21T10:20:48+08:00",
+    "type": "redeem_physical",
+    "title": "可乐一瓶",
+    "points": -60,
+    "exp": 0,
+    "rate": 20,
+    "note": "¥3 × 20"
+  },
+  {
+    "id": "demo-08",
+    "time": "2026-09-23T10:20:48+08:00",
+    "type": "earn",
+    "title": "刷牙",
+    "points": 5,
+    "exp": 5
+  },
+  {
+    "id": "demo-09",
+    "time": "2026-09-24T10:20:48+08:00",
+    "type": "use_voucher",
+    "title": "赖床券核销",
+    "points": 0,
+    "exp": 0,
+    "ref": "demo-06"
+  },
+  {
+    "id": "demo-10",
+    "time": "2026-09-24T10:20:48+08:00",
+    "type": "adjust",
+    "title": "冲正：上课记重了",
+    "points": -10,
+    "exp": -10,
+    "ref": "demo-02",
+    "note": "2/5 只有一节课"
+  }
 ]

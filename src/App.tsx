@@ -315,10 +315,69 @@ function Heatmap({ entries }: { entries: LedgerEntry[] }) {
                 多
               </span>
             </div>
+            {/* 二级面板：近 7 天 / 近 30 天柱状图 */}
+            <div className="mt-5 pt-5 border-t-2 border-dashed border-ink/25 grid grid-cols-1 md:grid-cols-5 gap-6">
+              <div className="md:col-span-2">
+                <DailyBars title="近 7 天" days={lastNDays(daily, today, 7)} />
+              </div>
+              <div className="md:col-span-3">
+                <DailyBars title="近 30 天" days={lastNDays(daily, today, 30)} compact />
+              </div>
+            </div>
           </div>
         </div>
       </Card>
     </section>
+  )
+}
+
+function lastNDays(daily: Map<string, number>, today: Date, n: number): { date: Date; pts: number }[] {
+  const key = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const out: { date: Date; pts: number }[] = []
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today)
+    d.setDate(today.getDate() - i)
+    out.push({ date: d, pts: daily.get(key(d)) ?? 0 })
+  }
+  return out
+}
+
+function DailyBars({ title, days, compact = false }: { title: string; days: { date: Date; pts: number }[]; compact?: boolean }) {
+  const max = Math.max(10, ...days.map((d) => d.pts))
+  const total = days.reduce((s, d) => s + d.pts, 0)
+  const activeDays = days.filter((d) => d.pts > 0).length
+  const dayLabel = (d: Date, i: number) =>
+    compact ? (i % 5 === 4 || i === days.length - 1 ? String(d.getDate()) : '') : `周${['一', '二', '三', '四', '五', '六', '日'][(d.getDay() + 6) % 7]}`
+  return (
+    <div>
+      <p className="text-sm mb-2">
+        <span className="font-bold">{title}</span>
+        <span className="opacity-50 ml-2">共 +{total} 分 · 记了 {activeDays}/{days.length} 天</span>
+      </p>
+      <div className={`flex items-end gap-[3px] ${compact ? 'h-28' : 'h-32'}`}>
+        {days.map(({ date, pts }, i) => {
+          const h = pts > 0 ? Math.max(8, Math.round((pts / max) * 100)) : 0
+          return (
+            <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group">
+              <span className={`text-[10px] text-accent mb-0.5 ${pts > 0 ? '' : 'opacity-0'}`}>+{pts}</span>
+              <div
+                title={`${date.toLocaleDateString('zh-CN')}${pts ? `：+${pts} 分` : '：未记分'}`}
+                className={`w-full border border-ink/40 ${pts > 0 ? 'bg-accent/70' : 'bg-muted/50'}`}
+                style={{
+                  height: `${pts > 0 ? h : 4}%`,
+                  borderRadius: '12px 12px 4px 4px / 18px 18px 4px 4px',
+                }}
+              />
+            </div>
+          )
+        })}
+      </div>
+      <div className={`flex gap-[3px] mt-1 text-[10px] opacity-50`}>
+        {days.map(({ date }, i) => (
+          <span key={i} className="flex-1 text-center truncate">{dayLabel(date, i)}</span>
+        ))}
+      </div>
+    </div>
   )
 }
 
