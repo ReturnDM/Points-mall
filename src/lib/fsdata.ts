@@ -102,6 +102,12 @@ export async function readBundle(dir: DirHandle): Promise<DataBundle> {
     }
   }
 
+  let rulesMarkdown: string | undefined
+  try {
+    const fh = await dir.getFileHandle('积分规则.md')
+    rulesMarkdown = await (await fh.getFile()).text()
+  } catch { /* 可选文件 */ }
+
   let ledgerMissing = false
   try {
     const ledgerDir = await dir.getDirectoryHandle('ledger')
@@ -116,6 +122,7 @@ export async function readBundle(dir: DirHandle): Promise<DataBundle> {
     shop,
     pricing,
     rate,
+    rulesMarkdown,
     readAt: new Date().toISOString(),
     dirName: typeof dir.name === 'string' ? dir.name : undefined,
     warnings: ledgerMissing && entries.length === 0

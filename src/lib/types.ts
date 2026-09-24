@@ -62,6 +62,8 @@ export interface DataBundle {
   pricing: TaskPricing | null
   /** 实物汇率（积分/元），来自数据目录 config.json，缺省 20 */
   rate: number
+  /** 专项计分细则（积分规则.md 原文），可选 */
+  rulesMarkdown?: string
   /** 本次读取时间（ISO） */
   readAt: string
   /** 数据目录名（展示用，让用户确认没选错目录） */

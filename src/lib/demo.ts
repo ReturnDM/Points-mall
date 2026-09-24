@@ -2,15 +2,17 @@ import type { DataBundle } from './types'
 
 /** 演示模式：?demo 从 public/demo/ 读取示例数据，无需授权目录 */
 export async function loadDemoBundle(): Promise<DataBundle> {
-  const [shop, tasks, ledger] = await Promise.all([
+  const [shop, tasks, ledger, rules] = await Promise.all([
     fetch('demo/shop.json').then((r) => r.json()),
     fetch('demo/tasks.json').then((r) => r.json()),
     fetch('demo/ledger.json').then((r) => r.json()),
+    fetch('demo/积分规则.md').then((r) => r.text()).catch(() => undefined),
   ])
   return {
     entries: ledger,
     shop: shop.items ?? shop,
     pricing: tasks,
+    rulesMarkdown: rules,
     rate: 20,
     readAt: new Date().toISOString(),
     dirName: '演示数据',

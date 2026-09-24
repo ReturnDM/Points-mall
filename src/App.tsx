@@ -90,7 +90,7 @@ export default function App() {
             <>
               <Dashboard points={summary.points} exp={summary.exp} level={summary.level} backpackCount={summary.backpack.length} rate={bundle.rate} />
               <Heatmap entries={bundle.entries} />
-              <Tasks pricing={bundle.pricing} />
+              <Tasks pricing={bundle.pricing} rulesMarkdown={bundle.rulesMarkdown} />
               <Shop shop={bundle.shop} points={summary.points} rate={bundle.rate} />
               <Backpack backpack={summary.backpack} />
               <LedgerList entries={sortEntries(bundle.entries)} />
@@ -381,7 +381,7 @@ function DailyBars({ title, days, compact = false }: { title: string; days: { da
   )
 }
 
-function Tasks({ pricing }: { pricing: { tiers: number[]; tasks: { id: string; name: string; points: number; emoji?: string }[] } | null }) {
+function Tasks({ pricing, rulesMarkdown }: { pricing: { tiers: number[]; tasks: { id: string; name: string; points: number; emoji?: string }[] } | null; rulesMarkdown?: string }) {
   return (
     <section aria-label="价目表">
       <SectionTitle sub="档位制，Agent 定档记账">价目表</SectionTitle>
@@ -411,6 +411,18 @@ function Tasks({ pricing }: { pricing: { tiers: number[]; tasks: { id: string; n
           </Card>
         ))}
       </div>
+      {rulesMarkdown && (
+        <details className="mt-4 group">
+          <summary className="cursor-pointer select-none inline-flex items-center gap-2 border-2 border-ink bg-muted px-4 py-2 wobbly-sm text-sm shadow-hard-sm hover:bg-postit transition-colors">
+            📐 专项计分细则（积分规则.md）
+            <span className="opacity-50 group-open:hidden">展开</span>
+            <span className="opacity-50 hidden group-open:inline">收起</span>
+          </summary>
+          <Card className="mt-3 p-5 text-sm leading-relaxed whitespace-pre-wrap" postit>
+            {rulesMarkdown}
+          </Card>
+        </details>
+      )}
     </section>
   )
 }
