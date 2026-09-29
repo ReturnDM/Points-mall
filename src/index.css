@@ -24,6 +24,11 @@ body {
   background-size: 24px 24px;
 }
 
+:focus-visible {
+  outline: 3px solid var(--color-pen);
+  outline-offset: 3px;
+}
+
 h1, h2, h3 {
   font-family: var(--font-marker);
 }

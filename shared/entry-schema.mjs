@@ -18,8 +18,8 @@ export function entryErrors(e) {
   const errs = []
   for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
     if (e[k] === undefined) errs.push(`缺少字段 ${k}`)
-  if (!Number.isFinite(e.points) || !Number.isFinite(e.exp))
-    errs.push(`points/exp 不是有限数字（${JSON.stringify([e.points, e.exp])}）`)
+  if (!Number.isSafeInteger(e.points) || !Number.isSafeInteger(e.exp))
+    errs.push(`points/exp 不是安全整数（${JSON.stringify([e.points, e.exp])}）`)
   if (e.type && !VALID_TYPES.has(e.type)) errs.push(`未知类型 ${e.type}`)
   if (e.time && Number.isNaN(Date.parse(e.time))) errs.push('time 不是合法时间')
   return errs

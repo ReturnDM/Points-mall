@@ -24,7 +24,7 @@ node scripts/ledger.mjs adjust --ref <id> [--points Δ] [--exp Δ] [--title ...]
                                                                  # 改账；不带 Δ 则全额冲正
 node scripts/ledger.mjs redeem <itemId> [--note "..."]           # 兑换（查 shop.json 定价）
 node scripts/ledger.mjs use <redeemId> [--note "..."]            # 核销虚拟券
-node scripts/ledger.mjs recycle <redeemId> [--note "..."]        # 回收（返还原实付 80%）
+node scripts/ledger.mjs recycle <redeemId> [--note "..."]        # 回收（返还该券当前有效实付的 80%）
 ```
 
 ## 记账要点（细节以两份 docs 为准）

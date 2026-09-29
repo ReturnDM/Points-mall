@@ -1,4 +1,5 @@
 import type { LedgerEntry } from './types'
+import { voucherState } from '../../shared/ledger-state.mjs'
 
 /**
  * 升级公式：第 N 级 → N+1 级所需经验 = 100 + 10 × (N - 1)
@@ -18,14 +19,23 @@ export interface LevelInfo {
 }
 
 export function levelFromExp(totalExp: number): LevelInfo {
-  let level = 1
-  let remaining = Math.max(0, totalExp)
-  let need = expForLevel(level)
-  while (remaining >= need) {
-    remaining -= need
-    level += 1
-    need = expForLevel(level)
+  if (!Number.isFinite(totalExp) || Math.abs(totalExp) > Number.MAX_SAFE_INTEGER)
+    throw new RangeError('经验总额超出安全计算范围')
+  const exp = Math.max(0, totalExp)
+  // 跨过 k 级所需经验为 5k(k + 19)；用公式定位，再校正浮点开方的边界误差。
+  let crossed = Math.max(0, Math.floor((Math.sqrt(361 + (4 * exp) / 5) - 19) / 2))
+  let spent = 5 * crossed * (crossed + 19)
+  while (spent > exp) {
+    crossed -= 1
+    spent = 5 * crossed * (crossed + 19)
   }
+  while (5 * (crossed + 1) * (crossed + 20) <= exp) {
+    crossed += 1
+    spent = 5 * crossed * (crossed + 19)
+  }
+  const level = crossed + 1
+  const remaining = exp - spent
+  const need = expForLevel(level)
   return { level, expInLevel: remaining, expToNext: need - remaining, expRequired: need }
 }
 
@@ -35,6 +45,8 @@ export interface Summary {
   level: LevelInfo
   /** 背包：未核销未回收的虚拟券 */
   backpack: LedgerEntry[]
+  /** 券经更正后的当前实付积分，供回收估值展示 */
+  voucherPaid: Map<string, number>
 }
 
 /** 实物默认汇率：首月试行 20 积分 = 1 元（可被数据目录 config.json 的 physicalRate 覆盖） */
@@ -45,7 +57,7 @@ export function yuanToPoints(yuan: number, rate: number = DEFAULT_RATE): number 
   return Math.ceil(yuan * rate)
 }
 
-/** 回收返还：原实付积分 × 80%，向下取整 */
+/** 回收返还：当前有效实付积分 × 80%，向下取整 */
 export function recycleValue(paidPoints: number): number {
   return Math.floor(paidPoints * 0.8)
 }
@@ -53,34 +65,18 @@ export function recycleValue(paidPoints: number): number {
 export function summarize(entries: LedgerEntry[]): Summary {
   let points = 0
   let exp = 0
-  // 与 scripts/ledger.mjs 的 computeConsumed 口径一致：
-  // 券被消费 = 存在「未被全额冲正」的核销/回收记录引用它；
-  // 另外 adjust 全额冲正兑换记录本身 → 券作废。
-  // 先建 id 索引再判定，避免嵌套 find 的 O(n²)。
-  const byId = new Map(entries.map((e) => [e.id, e]))
-  // 「累计全额冲正」的判定与 CLI 逐条比对口径一致：存在某一条 adjust 恰好等于原记录的反向全额
-  const reversedIds = new Set<string>()
-  for (const a of entries) {
-    if (a.type !== 'adjust' || !a.ref) continue
-    const orig = byId.get(a.ref)
-    if (orig && a.points === -orig.points && a.exp === -orig.exp) reversedIds.add(a.ref)
-  }
-  const consumedRefs = new Set<string>()
-  // 1) adjust 全额冲正了兑换记录本身 → 券作废
-  for (const id of reversedIds) {
-    if (byId.get(id)?.type === 'redeem_voucher') consumedRefs.add(id)
-  }
-  // 2) 有效（未被撤销）的核销/回收 → 券被消费
-  for (const c of entries) {
-    if ((c.type === 'use_voucher' || c.type === 'recycle_voucher') && c.ref && !reversedIds.has(c.id)) consumedRefs.add(c.ref)
-  }
+  const { consumed, voided, effectiveTotal } = voucherState(entries)
   const backpack: LedgerEntry[] = []
+  const voucherPaid = new Map<string, number>()
   for (const e of entries) {
     points += e.points
     exp += e.exp
-    if (e.type === 'redeem_voucher' && !consumedRefs.has(e.id)) backpack.push(e)
+    if (e.type === 'redeem_voucher' && !consumed.has(e.id) && !voided.has(e.id)) {
+      backpack.push(e)
+      voucherPaid.set(e.id, -effectiveTotal(e).points)
+    }
   }
-  return { points, exp, level: levelFromExp(exp), backpack }
+  return { points, exp, level: levelFromExp(exp), backpack, voucherPaid }
 }
 
 export function sortEntries(entries: LedgerEntry[]): LedgerEntry[] {

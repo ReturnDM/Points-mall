@@ -4,7 +4,7 @@
  *  - 每笔流水是一个独立 JSON 文件，文件名 = 记录 id；
  *  - Agent 写账：先写 `*.tmp` 临时文件再改名，避免读到半截文件；
  *  - 改账 / 冲正不覆盖历史：新增一条 type=adjust 的记录，ref 指向原记录；
- *  - 回收：ref 指向原兑换记录，按原实付积分 80% 返还（向下取整），不加经验。
+ *  - 回收：ref 指向原兑换记录，按当前有效实付积分 80% 返还（向下取整），不加经验。
  */
 
 export type LedgerType =
@@ -12,7 +12,7 @@ export type LedgerType =
   | 'redeem_physical' // 实物兑换：扣积分
   | 'redeem_voucher' // 虚拟券兑换：扣积分，券入背包
   | 'use_voucher' // 核销：券出背包，不扣积分
-  | 'recycle_voucher' // 回收：券出背包，返还原实付 80% 积分，不加经验
+  | 'recycle_voucher' // 回收：券出背包，返还当前有效实付 80% 积分，不加经验
   | 'adjust' // 补记 / 改账 / 撤销冲正，可带负数 points/exp，ref 指向原记录
 
 export interface LedgerEntry {
@@ -60,6 +60,11 @@ export interface DataBundle {
   entries: LedgerEntry[]
   shop: ShopItem[]
   pricing: TaskPricing | null
+  /** 商城或价目表文件缺失/格式错误；只影响对应版块 */
+  shopError?: string
+  pricingError?: string
+  /** 任一流水无法读取或账本级校验失败时，禁止展示余额等汇总 */
+  ledgerErrors: string[]
   /** 实物汇率（积分/元），来自数据目录 config.json，缺省 20 */
   rate: number
   /** 专项计分细则（积分规则.md 原文），可选 */
@@ -68,6 +73,6 @@ export interface DataBundle {
   readAt: string
   /** 数据目录名（展示用，让用户确认没选错目录） */
   dirName?: string
-  /** 读取/解析中出现的坏文件等警告 */
+  /** 非致命读取提示 */
   warnings: string[]
 }

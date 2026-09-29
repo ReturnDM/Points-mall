@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * 初始化数据目录：把 seed/ 里的示例文件拷到 POINTS_DATA_DIR（坚果云同步目录）。
+ * 初始化数据目录：拷贝价目表和商品模板，并创建空账本目录。
  * 路径解析：环境变量 POINTS_DATA_DIR > config.local.json 的 dataDir > 报错提示。
  * 已存在的文件不会被覆盖。
  */
-import { existsSync, readFileSync, mkdirSync, copyFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, copyFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,23 +23,19 @@ function resolveDataDir() {
   process.exit(1)
 }
 
-function copySeed(src, dest) {
-  for (const name of readdirSync(src)) {
-    const s = join(src, name)
-    const d = join(dest, name)
-    if (statSync(s).isDirectory()) {
-      mkdirSync(d, { recursive: true })
-      copySeed(s, d)
-    } else if (!existsSync(d)) {
-      copyFileSync(s, d)
-      console.log('写入', d)
-    } else {
-      console.log('已存在，跳过', d)
-    }
+function copyTemplate(name, dest) {
+  const source = join(root, 'seed', name)
+  const target = join(dest, name)
+  if (!existsSync(target)) {
+    copyFileSync(source, target)
+    console.log('写入', target)
+  } else {
+    console.log('已存在，跳过', target)
   }
 }
 
 const dataDir = resolveDataDir()
 mkdirSync(dataDir, { recursive: true })
-copySeed(join(root, 'seed'), dataDir)
+for (const name of ['tasks.json', 'shop.json']) copyTemplate(name, dataDir)
+mkdirSync(join(dataDir, 'ledger'), { recursive: true })
 console.log('数据目录初始化完成：', dataDir)

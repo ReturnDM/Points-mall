@@ -15,12 +15,15 @@ export default function App() {
 
   const load = useCallback(async (dir: unknown) => {
     setDirRef(dir)
+    setStatus((current) => current === 'ready' ? current : 'loading')
     try {
       const data = await readBundle(dir)
       setBundle(data)
+      setError('')
       setStatus('ready')
-    } catch (e) {
-      setError(String(e))
+    } catch {
+      setBundle(null)
+      setError('数据目录读取失败，请检查浏览器授权后重试。')
       setStatus('error')
     }
   }, [])
@@ -33,7 +36,8 @@ export default function App() {
       await load(dir)
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
-        setError(String(e))
+        setBundle(null)
+        setError('无法选择数据目录，请检查浏览器授权后重试。')
         setStatus('error')
       }
     }
@@ -41,8 +45,13 @@ export default function App() {
 
   useEffect(() => {
     ;(async () => {
-      const dir = await loadDirHandle()
-      if (dir && (await ensurePermission(dir))) await load(dir)
+      try {
+        const dir = await loadDirHandle()
+        if (dir && (await ensurePermission(dir))) await load(dir)
+      } catch {
+        setError('恢复上次选择的数据目录失败，请重新选择。')
+        setStatus('error')
+      }
     })()
   }, [load])
 
@@ -58,11 +67,13 @@ export default function App() {
     }
   }, [dirRef, load])
 
-  const summary = bundle ? summarize(bundle.entries) : null
+  const summary = bundle && bundle.ledgerErrors.length === 0
+    ? summarize(bundle.entries)
+    : null
 
   return (
     <div className="min-h-screen px-6 py-10 max-w-5xl mx-auto">
-      <Header onPick={pick} onReload={() => dirRef && load(dirRef)} hasData={!!summary} pickSupported={pickSupported} />
+      <Header onPick={pick} onReload={() => dirRef && load(dirRef)} hasData={!!dirRef} pickSupported={pickSupported} />
       {status === 'idle' && <Welcome onPick={pick} pickSupported={pickSupported} />}
       {status === 'loading' && <p className="text-xl text-center py-20">正在翻账本…</p>}
       {status === 'error' && (
@@ -71,22 +82,29 @@ export default function App() {
           <WobblyButton className="mt-4" onClick={pick}>重新选择数据目录</WobblyButton>
         </Card>
       )}
-      {status === 'ready' && bundle && summary && (
+      {status === 'ready' && bundle && (
         <main className="space-y-16">
           <TrustBanner bundle={bundle} onPick={pick} />
-          {bundle.entries.length === 0 ? (
+          {bundle.ledgerErrors.length > 0 ? (
+            <LedgerUnavailable problems={bundle.ledgerErrors} onReload={() => dirRef && load(dirRef)} />
+          ) : bundle.entries.length === 0 ? (
             <Card className="p-8 text-center border-dashed">
               <AlertTriangle className="mx-auto mb-3 text-accent" size={40} strokeWidth={2.5} />
-              <p className="text-xl">没有读到任何流水 —— 下方的余额 / 等级不可信</p>
-              <p className="mt-2 opacity-60">可能是选错了目录，或账本还没有第一笔记录。检查目录名或重新选择。</p>
+              <p className="text-xl">账本还没有流水，当前余额为 0 分</p>
+              <p className="mt-2 opacity-60">记下第一笔后，流水和活跃度就会显示出来。</p>
             </Card>
-          ) : (
+          ) : null}
+          {summary && (
             <>
               <Dashboard points={summary.points} exp={summary.exp} level={summary.level} backpackCount={summary.backpack.length} rate={bundle.rate} />
               <Heatmap entries={bundle.entries} />
-              <Tasks pricing={bundle.pricing} rulesMarkdown={bundle.rulesMarkdown} />
-              <Shop shop={bundle.shop} points={summary.points} rate={bundle.rate} />
-              <Backpack backpack={summary.backpack} />
+            </>
+          )}
+          <Tasks pricing={bundle.pricing} error={bundle.pricingError} rulesMarkdown={bundle.rulesMarkdown} />
+          <Shop shop={bundle.shop} error={bundle.shopError} points={summary?.points ?? null} rate={bundle.rate} />
+          {summary && (
+            <>
+              <Backpack backpack={summary.backpack} voucherPaid={summary.voucherPaid} />
               <LedgerList entries={sortEntries(bundle.entries)} />
             </>
           )}
@@ -127,11 +145,12 @@ function Header({ onPick, onReload, hasData, pickSupported }: { onPick: () => vo
 /** 可信度横幅：数据目录名 + 读取时间 + 警告，置于总览上方 */
 function TrustBanner({ bundle, onPick }: { bundle: DataBundle; onPick: () => void }) {
   const readTime = new Date(bundle.readAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  const hasCritical = bundle.entries.length === 0
+  const hasCritical = bundle.ledgerErrors.length > 0
   return (
     <div className={`border-2 border-dashed ${hasCritical ? 'border-accent text-accent' : 'border-ink/30'} wobbly-sm px-4 py-2 text-sm flex flex-wrap items-center gap-x-4 gap-y-1`}>
       <span>📂 {bundle.dirName ?? '已授权目录'}</span>
       <span className="opacity-60">读取于 {readTime} · 切回页面会自动刷新</span>
+      {bundle.ledgerErrors.length > 0 && <span className="basis-full font-bold">账本不完整 · 已暂停余额和等级汇总</span>}
       {bundle.warnings.length > 0 && (
         <span className="basis-full">
           {bundle.warnings.map((w, i) => (
@@ -145,6 +164,25 @@ function TrustBanner({ bundle, onPick }: { bundle: DataBundle; onPick: () => voi
         </WobblyButton>
       )}
     </div>
+  )
+}
+
+function LedgerUnavailable({ problems, onReload }: { problems: string[]; onReload: () => void }) {
+  return (
+    <Card className="p-6 border-dashed">
+      <div role="alert">
+        <div className="flex items-center gap-3 text-accent">
+          <AlertTriangle size={28} strokeWidth={2.5} aria-hidden />
+          <h2 className="text-2xl font-bold">账本读取不完整</h2>
+        </div>
+        <p className="mt-3">为避免显示错误结果，余额、等级、背包和活跃度已暂停展示。请检查以下问题后刷新：</p>
+        <ul className="mt-3 list-disc pl-6 text-sm space-y-1 break-all">
+          {problems.slice(0, 8).map((problem, i) => <li key={i}>{problem}</li>)}
+        </ul>
+        {problems.length > 8 && <p className="mt-2 text-sm">还有 {problems.length - 8} 个问题，请运行账本自检查看全部。</p>}
+      </div>
+      <WobblyButton variant="secondary" className="mt-5" onClick={onReload}>重新读取</WobblyButton>
+    </Card>
   )
 }
 
@@ -201,10 +239,10 @@ function Dashboard({ points, exp, level, backpackCount, rate }: { points: number
 
 function Heatmap({ entries }: { entries: LedgerEntry[] }) {
   const WEEKS = 26
-  // 每日加分 = 当天所有正向流水的 points 之和（earn + 正向 adjust）
+  // 只看完成事项；退款、回收返分和更正不代表当天完成了事项。
   const daily = new Map<string, number>()
   for (const e of entries) {
-    if (e.points <= 0) continue
+    if (e.type !== 'earn' || e.points <= 0) continue
     const d = new Date(e.time)
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     daily.set(key, (daily.get(key) ?? 0) + e.points)
@@ -217,7 +255,7 @@ function Heatmap({ entries }: { entries: LedgerEntry[] }) {
   end.setDate(end.getDate() + (7 - ((end.getDay() + 6) % 7) - 1)) // 推到本周日
   const start = new Date(end)
   start.setDate(start.getDate() - (WEEKS * 7 - 1))
-  const levelOfDay = (pts: number | undefined) => (pts === undefined ? 0 : pts >= 200 ? 4 : pts >= 100 ? 3 : pts >= 50 ? 2 : pts >= 10 ? 1 : 0)
+  const levelOfDay = (pts: number | undefined) => (pts === undefined ? 0 : pts >= 300 ? 4 : pts >= 150 ? 3 : pts >= 50 ? 2 : pts >= 10 ? 1 : 0)
 
   const columns: { date: Date; pts?: number }[][] = []
   const monthLabels: { col: number; label: string }[] = []
@@ -262,60 +300,64 @@ function Heatmap({ entries }: { entries: LedgerEntry[] }) {
 
   return (
     <section aria-label="活跃度">
-      <SectionTitle sub="每天加分越多，颜色越红（档位阈值 10 / 50 / 100 / 200）">活跃度</SectionTitle>
-      <Card className="p-6 overflow-x-auto">
-        <div className="flex gap-2 min-w-[640px]">
-          <div className="flex flex-col justify-between text-xs opacity-50 py-0.5 shrink-0">
-            {dayNames.map((d, i) => (
-              <span key={d} className={i % 2 === 0 ? '' : 'invisible'} style={{ height: 18, lineHeight: '18px' }}>{d}</span>
-            ))}
-          </div>
-          <div>
-            <div className="relative h-5 mb-1 text-xs opacity-50">
-              {monthLabels.map((m) => (
-                <span key={m.col} className="absolute" style={{ left: m.col * 22 }}>{m.label}</span>
+      <SectionTitle sub="按完成事项获得积分计，回收与更正不计入">活跃度</SectionTitle>
+      <Card className="p-6">
+        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="过去 26 周的活跃度图表，可横向滚动">
+          <div className="flex gap-2 min-w-[640px]">
+            <div className="flex flex-col justify-between text-xs opacity-50 py-0.5 shrink-0" aria-hidden>
+              {dayNames.map((d, i) => (
+                <span key={d} className={i % 2 === 0 ? '' : 'invisible'} style={{ height: 18, lineHeight: '18px' }}>{d}</span>
               ))}
             </div>
-            <div className="flex gap-[4px]">
-              {columns.map((col, ci) => (
-                <div key={ci} className="flex flex-col gap-[4px]">
-                  {col.map(({ date, pts }) => {
-                    const lvl = levelOfDay(pts)
-                    const isToday = date.getTime() === today.getTime()
-                    const future = date > today
-                    return (
-                      <div
-                        key={date.toISOString()}
-                        title={`${date.toLocaleDateString('zh-CN')}${pts ? `：+${pts} 分` : future ? '' : '：未记分'}`}
-                        className={`w-[18px] h-[18px] border ${future ? 'border-ink/10' : 'border-ink/25'} ${
-                          future ? 'bg-transparent' : levelClass[lvl]
-                        } ${isToday ? 'ring-2 ring-pen/60' : ''} hover:scale-125 transition-transform`}
-                        style={{ borderRadius: '25px 10px 20px 10px / 10px 20px 10px 25px' }}
-                      />
-                    )
-                  })}
-                </div>
-              ))}
-            </div>
-            <div className="mt-3 flex items-center justify-between text-xs opacity-60 flex-wrap gap-2">
-              <span>
-                本周 +{weekPoints} 分 · 连续 {streak} 天 · 最高单日 +{maxDay} 分
-              </span>
-              <span className="flex items-center gap-1">
-                少
-                {levelClass.map((c, i) => (
-                  <span key={i} className={`inline-block w-[14px] h-[14px] border border-ink/25 ${c}`} style={{ borderRadius: '25px 10px 20px 10px / 10px 20px 10px 25px' }} />
+            <div>
+              <div className="relative h-5 mb-1 text-xs opacity-50" aria-hidden>
+                {monthLabels.map((m) => (
+                  <span key={m.col} className="absolute" style={{ left: m.col * 22 }}>{m.label}</span>
                 ))}
-                多
-              </span>
-            </div>
-            {/* 二级面板：近 7 天 / 近 30 天柱状图 */}
-            <div className="mt-5 pt-5 border-t-2 border-dashed border-ink/25 grid grid-cols-1 md:grid-cols-5 gap-6">
-              <div className="md:col-span-2">
-                <DailyBars title="近 7 天" days={lastNDays(daily, today, 7)} />
               </div>
-              <div className="md:col-span-3">
-                <DailyBars title="近 30 天" days={lastNDays(daily, today, 30)} compact />
+              <div className="flex gap-[4px]">
+                {columns.map((col, ci) => (
+                  <div key={ci} className="flex flex-col gap-[4px]">
+                    {col.map(({ date, pts }) => {
+                      const lvl = levelOfDay(pts)
+                      const isToday = date.getTime() === today.getTime()
+                      const future = date > today
+                      return (
+                        <div
+                          key={date.toISOString()}
+                          role="img"
+                          aria-label={`${date.toLocaleDateString('zh-CN')}${future ? '：未来日期' : pts ? `：获得 ${pts} 分` : '：未记分'}`}
+                          title={`${date.toLocaleDateString('zh-CN')}${future ? '：未来日期' : pts ? `：获得 ${pts} 分` : '：未记分'}`}
+                          className={`w-[18px] h-[18px] border ${future ? 'border-ink/10' : 'border-ink/25'} ${
+                            future ? 'bg-transparent' : levelClass[lvl]
+                          } ${isToday ? 'ring-2 ring-pen/60' : ''} hover:scale-125 transition-transform`}
+                          style={{ borderRadius: '25px 10px 20px 10px / 10px 20px 10px 25px' }}
+                        />
+                      )
+                    })}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex items-center justify-between text-xs opacity-60 flex-wrap gap-2">
+                <span>
+                  本周 +{weekPoints} 分 · 连续 {streak} 天 · 最高单日 +{maxDay} 分
+                </span>
+                <span className="flex items-center gap-1" aria-hidden>
+                  少
+                  {levelClass.map((c, i) => (
+                    <span key={i} className={`inline-block w-[14px] h-[14px] border border-ink/25 ${c}`} style={{ borderRadius: '25px 10px 20px 10px / 10px 20px 10px 25px' }} />
+                  ))}
+                  多
+                </span>
+              </div>
+              {/* 二级面板：近 7 天 / 近 30 天柱状图 */}
+              <div className="mt-5 pt-5 border-t-2 border-dashed border-ink/25 grid grid-cols-1 md:grid-cols-5 gap-6">
+                <div className="md:col-span-2">
+                  <DailyBars title="近 7 天" days={lastNDays(daily, today, 7)} />
+                </div>
+                <div className="md:col-span-3">
+                  <DailyBars title="近 30 天" days={lastNDays(daily, today, 30)} compact />
+                </div>
               </div>
             </div>
           </div>
@@ -348,14 +390,16 @@ function DailyBars({ title, days, compact = false }: { title: string; days: { da
         <span className="font-bold">{title}</span>
         <span className="opacity-50 ml-2">共 +{total} 分 · 记了 {activeDays}/{days.length} 天</span>
       </p>
-      <div className={`flex items-end gap-[3px] ${compact ? 'h-28' : 'h-32'}`}>
+      <div role="group" aria-label={`${title}每日获得积分`} className={`flex items-end gap-[3px] ${compact ? 'h-28' : 'h-32'}`}>
         {days.map(({ date, pts }, i) => {
           const h = pts > 0 ? Math.max(8, Math.round((pts / max) * 100)) : 0
           return (
             <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group">
-              <span className={`text-[10px] text-accent mb-0.5 ${pts > 0 ? '' : 'opacity-0'}`}>+{pts}</span>
+              <span aria-hidden className={`text-[10px] text-accent mb-0.5 ${pts > 0 ? '' : 'opacity-0'}`}>+{pts}</span>
               <div
                 title={`${date.toLocaleDateString('zh-CN')}${pts ? `：+${pts} 分` : '：未记分'}`}
+                role="img"
+                aria-label={`${date.toLocaleDateString('zh-CN')}${pts ? `：获得 ${pts} 分` : '：未记分'}`}
                 className={`w-full border border-ink/40 ${pts > 0 ? 'bg-accent/70' : 'bg-muted/50'}`}
                 style={{
                   height: `${pts > 0 ? h : 4}%`,
@@ -366,7 +410,7 @@ function DailyBars({ title, days, compact = false }: { title: string; days: { da
           )
         })}
       </div>
-      <div className={`flex gap-[3px] mt-1 text-[10px] opacity-50`}>
+      <div aria-hidden className={`flex gap-[3px] mt-1 text-[10px] opacity-50`}>
         {days.map(({ date }, i) => (
           <span key={i} className="flex-1 text-center truncate">{dayLabel(date, i)}</span>
         ))}
@@ -375,12 +419,16 @@ function DailyBars({ title, days, compact = false }: { title: string; days: { da
   )
 }
 
-function Tasks({ pricing, rulesMarkdown }: { pricing: { tiers: number[]; tasks: { id: string; name: string; points: number; emoji?: string }[] } | null; rulesMarkdown?: string }) {
+function Tasks({ pricing, error, rulesMarkdown }: { pricing: { tiers: number[]; tasks: { id: string; name: string; points: number; emoji?: string }[] } | null; error?: string; rulesMarkdown?: string }) {
   return (
     <section aria-label="价目表">
       <SectionTitle sub="档位制，Agent 定档记账">价目表</SectionTitle>
-      {!pricing ? (
-        <Card className="p-6 text-center opacity-60">数据目录里还没有 tasks.json</Card>
+      {error ? (
+        <Card className="p-6">
+          <p role="alert" className="text-accent">价目表暂不可用：{error}。请修正文件后刷新。</p>
+        </Card>
+      ) : !pricing ? (
+        <Card className="p-6 text-center opacity-60">数据目录里还没有价目表</Card>
       ) : (
         <div className="flex flex-wrap gap-4 mb-6">
           {pricing.tiers.map((t, i) => (
@@ -421,79 +469,87 @@ function Tasks({ pricing, rulesMarkdown }: { pricing: { tiers: number[]; tasks: 
   )
 }
 
-function Shop({ shop, points, rate }: { shop: ShopItem[]; points: number; rate: number }) {
+function Shop({ shop, error, points, rate }: { shop: ShopItem[]; error?: string; points: number | null; rate: number }) {
   return (
     <section aria-label="商城">
       <SectionTitle sub={`双轨定价：实物 ${rate} 分 = 1 元，虚拟券独立定价`}>商城</SectionTitle>
-      {shop.length === 0 ? (
+      {error ? (
+        <Card className="p-6">
+          <p role="alert" className="text-accent">商城暂不可用：{error}。请修正文件后刷新。</p>
+        </Card>
+      ) : shop.length === 0 ? (
         <Card className="p-6 text-center opacity-60">数据目录里还没有 shop.json，商品清单由 Agent 添加</Card>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {shop.map((item, i) => {
-            const price = item.type === 'voucher' ? item.points : yuanToPoints(item.yuan ?? 0, rate)
-            const priceBad = item.type === 'voucher'
-              ? !Number.isFinite(price) || (price as number) <= 0
-              : !Number.isFinite(item.yuan) || (item.yuan ?? 0) <= 0
-            const affordable = !priceBad && points >= (price as number)
-            return (
-              <Card
-                key={item.id}
-                postit={item.type === 'voucher'}
-                decoration={i % 2 === 0 ? 'tape' : 'tack'}
-                className={`p-6 hover:rotate-1 transition-transform duration-100 ${affordable ? '' : 'opacity-70'}`}
-              >
-                <div className="text-4xl mb-2">{item.emoji ?? (item.type === 'voucher' ? '🎟️' : '📦')}</div>
-                <h3 className="text-xl font-bold">{item.name}</h3>
-                {item.desc && <p className="mt-1 text-sm opacity-60">{item.desc}</p>}
-                <div className="mt-4 flex items-center justify-between">
-                  {priceBad ? (
-                    <span className="text-sm text-accent">定价异常（请修 shop.json）</span>
-                  ) : (
-                    <>
-                      <span className="text-2xl font-bold text-accent">{price} 分</span>
-                      {item.type === 'physical' && item.yuan != null && (
-                        <span className="text-xs opacity-50">¥{item.yuan} × {rate}</span>
-                      )}
-                    </>
+        <>
+          {points === null && <p className="mb-5 text-sm text-pen">账本尚未确认，暂不显示余额是否足够。</p>}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+            {shop.map((item, i) => {
+              const price = item.type === 'voucher' ? item.points : yuanToPoints(item.yuan ?? 0, rate)
+              const priceBad = typeof price !== 'number' || !Number.isSafeInteger(price) || price <= 0
+              const affordable = !priceBad && points !== null && points >= (price as number)
+              return (
+                <Card
+                  key={item.id}
+                  postit={item.type === 'voucher'}
+                  decoration={i % 2 === 0 ? 'tape' : 'tack'}
+                  className={`p-6 hover:rotate-1 transition-transform duration-100 ${points !== null && !affordable ? 'opacity-70' : ''}`}
+                >
+                  <div className="text-4xl mb-2">{item.emoji ?? (item.type === 'voucher' ? '🎟️' : '📦')}</div>
+                  <h3 className="text-xl font-bold">{item.name}</h3>
+                  {item.desc && <p className="mt-1 text-sm opacity-60">{item.desc}</p>}
+                  <div className="mt-4 flex items-center justify-between">
+                    {priceBad ? (
+                      <span className="text-sm text-accent">定价异常（请修 shop.json）</span>
+                    ) : (
+                      <>
+                        <span className="text-2xl font-bold text-accent">{price} 分</span>
+                        {item.type === 'physical' && item.yuan != null && (
+                          <span className="text-xs opacity-50">¥{item.yuan} × {rate}</span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {!priceBad && points !== null && !affordable && <p className="mt-2 text-sm text-pen">还差 {(price as number) - points} 分</p>}
+                  {item.type === 'voucher' && !priceBad && (
+                    <p className="mt-2 text-xs opacity-50 border-t border-dashed border-ink/30 pt-2">
+                      兑换后入背包 · 未核销可回收 {recycleValue(price as number)} 分
+                    </p>
                   )}
-                </div>
-                {!priceBad && !affordable && <p className="mt-2 text-sm text-pen">还差 {(price as number) - points} 分</p>}
-                {item.type === 'voucher' && !priceBad && (
-                  <p className="mt-2 text-xs opacity-50 border-t border-dashed border-ink/30 pt-2">
-                    兑换后入背包 · 未核销可回收 {recycleValue(price as number)} 分
-                  </p>
-                )}
-              </Card>
-            )
-          })}
-        </div>
+                </Card>
+              )
+            })}
+          </div>
+        </>
       )}
     </section>
   )
 }
 
-function Backpack({ backpack }: { backpack: LedgerEntry[] }) {
+function Backpack({ backpack, voucherPaid }: { backpack: LedgerEntry[]; voucherPaid: Map<string, number> }) {
   return (
     <section aria-label="背包">
-      <SectionTitle sub="核销不再扣积分；回收返还原实付 80%">背包</SectionTitle>
+      <SectionTitle sub="核销不再扣积分；回收返还当前有效实付的 80%">背包</SectionTitle>
       {backpack.length === 0 ? (
         <Card className="p-6 text-center opacity-60">背包空空如也，去商城兑换点券吧</Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {backpack.map((c, i) => (
-            <Card key={c.id} className={`p-5 flex items-center justify-between ${i % 2 ? 'rotate-1' : '-rotate-1'}`} postit>
-              <div>
-                <p className="text-lg font-bold">🎟️ {c.title}</p>
-                <p className="text-sm opacity-60">
-                  兑换于 {new Date(c.time).toLocaleDateString('zh-CN')} · 实付 {c.points * -1} 分
-                </p>
-              </div>
-              <div className="text-right">
-                <p className="text-sm">待核销</p>
-                <p className="text-xs opacity-50">回收可得 {recycleValue(c.points * -1)} 分</p>
-              </div>
-            </Card>
-          ))}
+          {backpack.map((c, i) => {
+            const paid = voucherPaid.get(c.id) ?? -c.points
+            return (
+              <Card key={c.id} className={`p-5 flex items-center justify-between ${i % 2 ? 'rotate-1' : '-rotate-1'}`} postit>
+                <div>
+                  <p className="text-lg font-bold">🎟️ {c.title}</p>
+                  <p className="text-sm opacity-60">
+                    兑换于 {new Date(c.time).toLocaleDateString('zh-CN')} · 当前实付 {paid} 分
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm">待核销</p>
+                  <p className="text-xs opacity-50">回收可得 {recycleValue(paid)} 分</p>
+                </div>
+              </Card>
+            )
+          })}
         </div>
       )}
     </section>
@@ -530,30 +586,49 @@ function LedgerList({ entries }: { entries: LedgerEntry[] }) {
             const t = typeLabel[e.type] ?? { text: e.type, cls: '' }
             const hasDetail = !!(e.note || e.ref)
             const open = expanded.has(e.id)
-            return (
-              <div
-                key={e.id}
-                className={`flex items-start justify-between px-5 py-3 gap-4 ${hasDetail ? 'cursor-pointer hover:bg-muted/30' : ''}`}
-                onClick={hasDetail ? () => toggle(e.id) : undefined}
-              >
-                <div className="min-w-0">
-                  <p className={open ? '' : 'truncate'}>
+            const detailId = `ledger-detail-${e.id}`
+            const rowContent = (
+              <>
+                <span className="min-w-0">
+                  <span className="block truncate">
                     <span className={`text-sm mr-2 ${t.cls}`}>[{t.text}]</span>
                     {e.title}
-                  </p>
-                  {e.note && <p className={`text-sm opacity-50 ${open ? '' : 'truncate'}`}>✎ {e.note}</p>}
-                  {open && e.ref && <p className="text-xs opacity-40 mt-0.5">↳ 关联记录：{e.ref}</p>}
-                  {hasDetail && <p className="text-xs opacity-30 mt-0.5">{open ? '▲ 收起' : '▼ 展开详情'}</p>}
-                </div>
-                <div className="text-right shrink-0">
-                  <p className={`font-bold ${e.points > 0 ? 'text-accent' : e.points < 0 ? 'text-pen' : 'opacity-60'}`}>
+                  </span>
+                  {!open && e.note && <span className="block text-sm opacity-50 truncate">✎ {e.note}</span>}
+                  {hasDetail && <span className="block text-xs opacity-60 mt-0.5">{open ? '▲ 收起详情' : '▼ 展开详情'}</span>}
+                </span>
+                <span className="text-right shrink-0">
+                  <span className={`block font-bold ${e.points > 0 ? 'text-accent' : e.points < 0 ? 'text-pen' : 'opacity-60'}`}>
                     {e.points >= 0 ? '+' : ''}{e.points} 分
-                  </p>
-                  <p className="text-xs opacity-50">
+                  </span>
+                  <span className="block text-xs opacity-50">
                     {new Date(e.time).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                     {e.exp !== 0 && ` · exp ${e.exp >= 0 ? '+' : ''}${e.exp}`}
-                  </p>
-                </div>
+                  </span>
+                </span>
+              </>
+            )
+            return (
+              <div key={e.id}>
+                {hasDetail ? (
+                  <button
+                    type="button"
+                    className="w-full flex items-start justify-between px-5 py-3 gap-4 text-left cursor-pointer hover:bg-muted/30 focus-visible:bg-muted/40"
+                    aria-expanded={open}
+                    aria-controls={detailId}
+                    onClick={() => toggle(e.id)}
+                  >
+                    {rowContent}
+                  </button>
+                ) : (
+                  <div className="flex items-start justify-between px-5 py-3 gap-4">{rowContent}</div>
+                )}
+                {hasDetail && (
+                  <div id={detailId} hidden={!open} className="px-5 pb-4 pl-8 text-sm break-all">
+                    {e.note && <p>✎ {e.note}</p>}
+                    {e.ref && <p className="mt-1 opacity-70">↳ 关联记录：{e.ref}</p>}
+                  </div>
+                )}
               </div>
             )
           })}

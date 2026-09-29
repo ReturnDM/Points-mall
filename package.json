@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "ledger": "node scripts/ledger.mjs",
     "init-data": "node scripts/init-data.mjs",
-    "test": "node --test scripts/ledger.test.mjs"
+    "test": "node --test scripts/ledger.test.mjs scripts/init-data.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.548.0",

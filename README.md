@@ -16,6 +16,8 @@ npm run preview       # 本地静态服务打开 http://localhost:4173
 1. 浏览器（Edge / Chrome）打开页面，点「选择数据目录」，只读授权坚果云同步目录；
 2. 授权会记住（IndexedDB），重开时如失效再点一次重新授权。
 
+首次初始化只复制 `tasks.json` 和 `shop.json` 模板，并创建空 `ledger/`，起始余额为 0。再次运行不会覆盖已有数据。
+
 ## 数据目录配置（Agent 写账用）
 
 优先级：环境变量 `POINTS_DATA_DIR` → 项目根 `config.local.json`（`{ "dataDir": "..." }`，不入 git）→ 提示配置。代码不硬编码任何绝对路径。
@@ -27,11 +29,9 @@ src/
   lib/types.ts     # 数据 schema 类型
   lib/ledger.ts    # 流水汇总：余额 / 经验 / 等级 / 背包 / 汇率换算
   lib/fsdata.ts    # File System Access API 只读数据目录
-  lib/demo.ts      # ?demo 演示模式
   ui.tsx           # 手绘风基础组件（Card / WobblyButton / StickyTag）
   App.tsx          # 仪表盘 / 价目表 / 商城 / 背包 / 流水
-public/demo/       # 演示数据
-seed/              # 数据目录初始模板（init-data 拷贝用）
+seed/              # 价目表和商品模板（不含示例流水）
 docs/              # schema 定稿 + Agent 记账规范
 scripts/
   init-data.mjs     # 初始化数据目录
@@ -40,7 +40,7 @@ scripts/
 
 ## 记账接口
 
-本项目**不使用 skill**：Agent 直接调 `node scripts/ledger.mjs`（详见根目录 `AGENTS.md` 与 `docs/agent-ledger.md`）。
+记账统一调用 `node scripts/ledger.mjs`（详见根目录 `AGENTS.md` 与 `docs/agent-ledger.md`）。管家侧的 points-ledger skill 只负责路由，规则以本项目实时文件为准。
 schema 校验 / id 生成 / 原子写 / ref 完整性都固化在 CLI 里；无固定分值事项由主模型与 Jev 各判一次，差 ≤50% 取平均。
 
 ## 视觉规范

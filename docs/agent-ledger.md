@@ -1,6 +1,6 @@
 # Agent 记账规范（最简对话记账路径）
 
-> 已实现为 DSH Skill：管家侧薄指针版 `E:\agent管家\.dsh\skills\points-ledger\`（skill 只做路由，规则正文以本项目实时文件为准）。
+> 管家侧的 points-ledger skill 只做路由；记账规则以本项目 `docs/schema.md`、本文件及数据目录 `积分规则.md` 的实时内容为准；冲突时以 `docs/schema.md` 为准。
 > 写入走本地 CLI `scripts/ledger.mjs`（summary / list / earn / adjust / redeem / use / recycle / doctor / judge），
 > schema 校验、id 生成、tmp+改名原子写、ref 完整性检查、写锁、冲正防重都在 CLI 内固化，Agent 不直接写 JSON。
 
@@ -20,10 +20,10 @@
 |---|---|---|
 | 记账 / 补记（「刷了牙」） | 定分 → `earn` | points=+分值，exp=+分值 |
 | 改账 / 撤销（「刚才那条记错了」） | 找到原记录 → `adjust` | 按差额或全额冲正 points/exp，`ref` 指向原记录 |
-| 兑换实物（「换杯奶茶」） | 查 shop.json → `redeem_physical` | points=−⌈yuan×20⌉，记 `rate: 20` |
+| 兑换实物（「换杯奶茶」） | 查 shop.json → `redeem_physical` | points=−⌈yuan×physicalRate⌉，记实际使用的汇率快照 `rate`（缺省 20 分/元） |
 | 兑换虚拟券（「买张赖床券」） | `redeem_voucher` | points=−定价，券入背包 |
 | 核销（「用掉赖床券」） | `use_voucher` | points=0，`ref`=兑换记录 |
-| 回收（「赖床券退了吧」） | `recycle_voucher` | points=+⌊实付×0.8⌋，`ref`=兑换记录 |
+| 回收（「赖床券退了吧」） | `recycle_voucher` | points=+⌊该券当前有效实付×0.8⌋，`ref`=兑换记录；有效实付包含生效中的更正 |
 
 ## 3. 定分规则（灵活档位制 + Jev 复核）
 
@@ -37,16 +37,15 @@
 
 ## 4. 写入规则
 
-- 每笔一个 JSON：`<数据目录>/ledger/<YYYY-MM>/<id>.json`，id 形如 `YYYYMMDD-HHmmss-xxxx`。
-- **先写 `<id>.json.tmp`，再改名**为 `<id>.json`（原子提交）。
+- Agent 只调用 `node scripts/ledger.mjs` 写账，不直接创建或修改流水 JSON。CLI 将每笔写入 `<数据目录>/ledger/<YYYY-MM>/<id>.json`，id 形如 `YYYYMMDD-HHmmss-xxxx`，并负责校验、加锁及原子提交。
 - 校验同步：切电脑先等坚果云同步完成再写账（可对比最新流水的 `time` 是否异常陈旧）。
 - 改账不覆盖历史，只追加 `adjust` 记录。
 
 ## 5. 回报格式（示例）
 
 > ✅ 记账成功：刷牙 +5 分（+5 经验）
-> 当前余额 1,240 分 ≈ ¥62 · Lv.6（还差 42 经验升级）
+> 当前余额 1,240 分 ≈ ¥62.00（按示例汇率 20 分/元）· Lv.6（还差 42 经验升级）
 
 ## 6. 尚未实现
 
-- Jev 评分的实际接入调优（skill 已含分流逻辑，待跑一段时间校准 50% 阈值）。
+- Jev 评分的实际接入调优（CLI 已提供 `judge`，待跑一段时间校准 50% 阈值）。

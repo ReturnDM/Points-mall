@@ -8,18 +8,21 @@
  *   node scripts/ledger.mjs list [--limit 20] [--type earn]
  *   node scripts/ledger.mjs earn <title> <points> [--note "..."]
  *   node scripts/ledger.mjs adjust --ref <id> [--points Δ] [--exp Δ] [--title "..."] [--note "..."]
- *                                        # 不带 Δ 则全额冲正（每条记录只能全额冲正一次）
+ *                                        # 不带 Δ 则全额冲正；已冲正的记录须先撤销该冲正
  *                                        # 累计更正（正反两向）不得超过原记录的绝对值，防超冲/虚增
  *   node scripts/ledger.mjs redeem <itemId> [--note "..."]   # 兑换（查 shop.json 定价，余额不足拒绝）
  *   node scripts/ledger.mjs use <redeemId> [--note "..."]    # 核销虚拟券
- *   node scripts/ledger.mjs recycle <redeemId> [--note "..."] # 回收（返还原实付 80%）
+ *   node scripts/ledger.mjs recycle <redeemId> [--note "..."] # 回收（返还当前有效实付的 80%）
  *   node scripts/ledger.mjs doctor                       # 账本自检：坏流水/重复id/无效ref/重复核销
  *   node scripts/ledger.mjs judge "<事项描述>" [--context "..."]  # Jev 定档建议（需 TYPESAFE_API_KEY）
  */
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { VALID_TYPES, entryErrors } from '../shared/entry-schema.mjs'
+import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
+import { entryErrors } from '../shared/entry-schema.mjs'
+import { ledgerErrors, voucherState } from '../shared/ledger-state.mjs'
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DEFAULT_RATE = 20
@@ -82,31 +85,52 @@ function writeEntry(dataDir, entry) {
 // ---------- 写锁：防止并发写账（如两个 Agent 同时 redeem 把余额刷负） ----------
 const LOCK_NAME = '.ledger.lock'
 const LOCK_STALE_MS = 30_000
-let heldLockPath = null
-// 进程退出（含 fail 的 process.exit）时尽力释放锁；残留的锁靠超时抢占兜底
-process.on('exit', () => { if (heldLockPath) { try { unlinkSync(heldLockPath) } catch { /* 已被抢占则忽略 */ } } })
+let heldLock = null
+// 只有持有者可释放锁；持有进程仍存活时，扫描再久也不能抢占。
+function releaseHeldLock() {
+  if (!heldLock) return
+  const { path, token } = heldLock
+  heldLock = null
+  try {
+    if (JSON.parse(readFileSync(path, 'utf8')).token === token) unlinkSync(path)
+  } catch { /* 锁已移除或被替换 */ }
+}
+process.on('exit', releaseHeldLock)
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true }
+  catch (err) { return err.code !== 'ESRCH' }
+}
 
 /** 获取数据目录级写锁；返回释放函数。抢不到则 fail。 */
 function acquireLock(dataDir) {
   const lock = join(dataDir, LOCK_NAME)
   const deadline = Date.now() + 5000
+  const owner = { pid: process.pid, host: hostname(), token: randomUUID() }
   while (true) {
     try {
       const fd = openSync(lock, 'wx')
-      closeSync(fd)
-      heldLockPath = lock
-      return () => { try { unlinkSync(lock) } catch { /* 忽略 */ } heldLockPath = null }
+      let written = false
+      try { writeFileSync(fd, JSON.stringify(owner), 'utf8'); written = true }
+      finally {
+        closeSync(fd)
+        if (!written) { try { unlinkSync(lock) } catch { /* 忽略 */ } }
+      }
+      heldLock = { path: lock, token: owner.token }
+      return releaseHeldLock
     } catch (err) {
       if (err.code !== 'EEXIST') fail(`无法创建写锁 ${lock}：${err.message}`)
-      // 陈旧锁（持有者崩溃残留）超时后抢占
+      // 无法确认持有者死亡的锁绝不抢占，避免旧进程删除新锁。
       try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          console.error(`⚠ 写锁已陈旧（>${LOCK_STALE_MS / 1000}s），强制抢占：${lock}`)
+        const current = JSON.parse(readFileSync(lock, 'utf8'))
+        if (current.host === owner.host && Number.isSafeInteger(current.pid) &&
+            !processAlive(current.pid) && Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          console.error(`⚠ 已确认写锁持有进程退出，清理陈旧锁：${lock}`)
           unlinkSync(lock)
           continue
         }
       } catch { /* 锁刚好被释放，重试 */ }
-      if (Date.now() > deadline) fail('获取写锁超时（5s）：另一笔写账正在进行或锁文件残留，稍后重试')
+      if (Date.now() > deadline) fail('获取写锁超时（5s）：另一笔写账仍在进行，或锁的持有者无法确认；请检查 .ledger.lock')
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100) // sleep 100ms
     }
   }
@@ -133,7 +157,10 @@ function readLedgerEx(dataDir) {
           // 通过的才进 entries（summary 也不会再被坏数据污染出 NaN）
           const errs = entryErrors(e)
           if (errs.length > 0) invalid.push(`ledger/${relName}: ${errs.join('；')}`)
-          else entries.push(e)
+          else {
+            if (name !== `${e.id}.json`) invalid.push(`ledger/${relName}: 文件名与记录 id ${e.id} 不一致`)
+            entries.push(e)
+          }
         } catch (err) { bad.push(`ledger/${relName}: ${err.message}`) }
       }
     }
@@ -151,53 +178,43 @@ function readLedger(dataDir) {
 }
 
 /** 严格读取：任何坏文件或字段异常都拒绝——写账前账本必须完整可信 */
-function readLedgerStrict(dataDir) {
+function readLedgerStrict(dataDir, purpose = '写账') {
   const { entries, bad, invalid } = readLedgerEx(dataDir)
-  if (bad.length > 0 || invalid.length > 0) {
-    console.error('账本中存在无法解析或字段异常的流水，拒绝写账（防止在坏数据上继续叠加）：')
-    for (const b of bad) console.error(`  ⚠ ${b}`)
-    for (const v of invalid) console.error(`  ⚠ ${v}`)
-    fail(`共 ${bad.length + invalid.length} 个问题，先修复或移走它们（可用 doctor 查看），再重试`)
+  const problems = [...bad, ...invalid, ...ledgerErrors(entries)]
+  if (problems.length > 0) {
+    console.error(`账本存在问题，拒绝${purpose}：`)
+    for (const problem of problems) console.error(`  ⚠ ${problem}`)
+    fail(`共 ${problems.length} 个问题，先修复或移走它们（可用 doctor 查看），再重试`)
   }
   return entries
+}
+
+function writeValidatedEntry(dataDir, entries, entry) {
+  const problems = ledgerErrors([...entries, entry])
+  if (problems.length) fail(`这笔操作会使账本无效，拒绝写账：${problems.join('；')}`)
+  return writeEntry(dataDir, entry)
 }
 
 // ---------- 汇总计算 ----------
 const EXP_FOR = (lv) => 100 + 10 * (lv - 1)
 
-/** 唯一权威判定：一条记录是否已被「累计全额冲正」 */
-function isFullyReversed(entries, rec) {
-  return entries.some((x) => x.type === 'adjust' && x.ref === rec.id && x.points === -rec.points && x.exp === -rec.exp)
-}
-
-/** 唯一权威判定：每张虚拟券当前是否被有效消费（核销或回收，且该消费记录未被全额冲正撤销）。
- *  summarize（背包）、ensureVoucherActive（券可否操作）、doctor 必须共用本函数，禁止各自另算。 */
-function computeConsumed(entries) {
-  const consumed = new Set()
-  // 1) adjust 全额冲正了兑换记录本身 → 券作废
-  for (const e of entries) {
-    if (e.type === 'adjust' && e.ref) {
-      const orig = entries.find((x) => x.id === e.ref)
-      if (orig?.type === 'redeem_voucher' && e.points === -orig.points && e.exp === -orig.exp) consumed.add(orig.id)
-    }
-  }
-  // 2) 有效（未被撤销）的核销/回收 → 券被消费；已被全额冲正的消费记录不算数
-  for (const e of entries) {
-    if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref && !isFullyReversed(entries, e)) consumed.add(e.ref)
-  }
-  return consumed
-}
-
 function levelFromExp(exp) {
-  let lv = 1, rest = Math.max(0, exp), need = EXP_FOR(lv)
-  while (rest >= need) { rest -= need; lv++; need = EXP_FOR(lv) }
-  return { level: lv, expInLevel: rest, expToNext: need - rest, expRequired: need }
+  const earned = Math.max(0, exp)
+  const totalForTransitions = (n) => 5 * n * n + 95 * n
+  let transitions = Math.max(0, Math.floor((Math.sqrt(9025 + 20 * earned) - 95) / 10))
+  // Correct floating-point rounding at very large, but still safe, totals.
+  while (totalForTransitions(transitions + 1) <= earned) transitions++
+  while (transitions > 0 && totalForTransitions(transitions) > earned) transitions--
+  const level = transitions + 1
+  const expInLevel = earned - totalForTransitions(transitions)
+  const expRequired = EXP_FOR(level)
+  return { level, expInLevel, expToNext: expRequired - expInLevel, expRequired }
 }
 
 function summarize(entries) {
   let points = 0, exp = 0
-  const consumedRefs = computeConsumed(entries)
-  const backpack = entries.filter((e) => e.type === 'redeem_voucher' && !consumedRefs.has(e.id))
+  const { consumed, voided } = voucherState(entries)
+  const backpack = entries.filter((e) => e.type === 'redeem_voucher' && !consumed.has(e.id) && !voided.has(e.id))
   for (const e of entries) { points += e.points; exp += e.exp }
   return { points, exp, level: levelFromExp(exp), backpack }
 }
@@ -205,8 +222,13 @@ function reportSummary(entries) {
   const rate = readRate(globalThis.__dataDir)
   const s = summarize(entries)
   ok(`余额 ${s.points} 分 ≈ ¥${(s.points / rate).toFixed(2)}（${rate} 分 = 1 元）｜ Lv.${s.level.level}（${s.level.expInLevel}/${s.level.expRequired}，还差 ${s.level.expToNext} 经验升级）｜ 累计经验 ${s.exp} ｜ 背包 ${s.backpack.length} 张券`)
-  if (s.backpack.length)
-    for (const c of s.backpack) console.log(`   🎟️ ${c.title}（${c.id}，实付 ${-c.points} 分，回收可得 ${Math.floor(-c.points * 0.8)} 分）`)
+  if (s.backpack.length) {
+    const state = voucherState(entries)
+    for (const c of s.backpack) {
+      const paid = -state.effectiveTotal(c).points
+      console.log(`   🎟️ ${c.title}（${c.id}，当前实付 ${paid} 分，回收可得 ${Math.floor(paid * 0.8)} 分）`)
+    }
+  }
 }
 
 // ---------- ref 校验 ----------
@@ -216,15 +238,17 @@ function findEntry(entries, id, expectType) {
   if (expectType && e.type !== expectType) fail(`记录 ${id} 类型是 ${e.type}，不是 ${expectType}`)
   return e
 }
+function adjustmentRoot(entries, entry) {
+  let root = entry
+  while (root.type === 'adjust') root = findEntry(entries, root.ref)
+  return root
+}
 function ensureVoucherActive(entries, id) {
   const e = findEntry(entries, id, 'redeem_voucher')
-  if (isFullyReversed(entries, e)) {
-    const rev = entries.find((x) => x.type === 'adjust' && x.ref === id && x.points === -e.points && x.exp === -e.exp)
-    fail(`券 ${id} 的兑换已被全额冲正（记录 ${rev.id}），券已作废，不能再核销/回收`)
-  }
-  const consumed = computeConsumed(entries)
-  if (consumed.has(id)) {
-    const spent = entries.find((x) => (x.type === 'use_voucher' || x.type === 'recycle_voucher') && x.ref === id)
+  const state = voucherState(entries)
+  if (state.voided.has(id)) fail(`券 ${id} 的兑换已被全额冲正，券已作废，不能再核销/回收`)
+  if (state.consumed.has(id)) {
+    const spent = state.activeConsumptions.get(id)[0]
     fail(`券 ${id} 已被${spent.type === 'use_voucher' ? '核销' : '回收'}（记录 ${spent.id}），不能重复操作`)
   }
   return e
@@ -257,7 +281,7 @@ function readShop(dataDir) {
 
 switch (cmd) {
   case 'summary': {
-    reportSummary(readLedger(dataDir))
+    reportSummary(readLedgerStrict(dataDir, '汇总'))
     break
   }
   case 'list': {
@@ -273,15 +297,15 @@ switch (cmd) {
   }
   case 'earn': {
     const [title, pointsStr] = rest
-    if (!title || !Number.isFinite(Number(pointsStr))) fail('用法：earn <title> <points> [--note "..."]')
+    if (!title || !Number.isSafeInteger(Number(pointsStr))) fail('用法：earn <title> <安全整数 points> [--note "..."]')
     const pts = Number(pointsStr)
     if (pts <= 0) fail('earn 的积分必须为正数；冲正请用 adjust --ref')
     const opts = parseArgs(rest.slice(2))
     const release = acquireLock(dataDir)
     try {
-      readLedgerStrict(dataDir)
+      const entries = readLedgerStrict(dataDir)
       const entry = mkEntry('earn', title, pts, pts, opts.note ? { note: String(opts.note) } : {})
-      writeEntry(dataDir, entry)
+      writeValidatedEntry(dataDir, entries, entry)
       ok(`记账成功：${title} +${pts} 分（+${pts} 经验）`)
     } finally { release() }
     reportSummary(readLedger(dataDir))
@@ -293,42 +317,45 @@ switch (cmd) {
     const fullReverse = opts.points === undefined && opts.exp === undefined
     const dPoints0 = fullReverse ? 0 : Number(opts.points ?? 0)
     const dExp0 = fullReverse ? 0 : Number(opts.exp ?? 0)
-    if (!fullReverse && (!Number.isFinite(dPoints0) || !Number.isFinite(dExp0))) fail('--points / --exp 必须是数字')
+    if (!fullReverse && (!Number.isSafeInteger(dPoints0) || !Number.isSafeInteger(dExp0))) fail('--points / --exp 必须是安全整数')
     const release = acquireLock(dataDir)
     try {
       const entries = readLedgerStrict(dataDir)
       const orig = findEntry(entries, opts.ref)
       const dPoints = fullReverse ? -orig.points : dPoints0
       const dExp = fullReverse ? -orig.exp : dExp0
-      // 零值记录（核销 0/0）的冲正 = 撤销核销，语义在券状态里，不适用积分防重
+      const state = voucherState(entries)
+      // 零值记录只能作零值语义撤销，绝不能凭空产生积分或经验。
       const zeroOrig = orig.points === 0 && orig.exp === 0
-      if (fullReverse && !zeroOrig && entries.some((x) => x.type === 'adjust' && x.ref === orig.id && x.points === -orig.points && x.exp === -orig.exp))
-        fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正（重复冲正会重复返分）；如需再改，请对新产生的 adjust 记录操作`)
-      // 按累计冲正金额防重：正反两个方向的累计都不得越过原记录的绝对值（零值记录除外）
-      const adjSum = entries.reduce((s, x) => (x.type === 'adjust' && x.ref === orig.id ? { p: s.p + x.points, e: s.e + x.exp } : s), { p: 0, e: 0 })
+      if (zeroOrig && (dPoints !== 0 || dExp !== 0))
+        fail(`零值记录 ${orig.id} 的更正只能是 0 分 / 0 经验`)
+      if (state.isFullyReversed(orig))
+        fail(`记录 ${orig.id} 已被全额冲正过，不能重复冲正；如需撤销冲正，请对新产生的 adjust 记录操作`)
+      // 已被更正的 adjust 可以再更正；这里计算整条冲正子树的当前净额。
+      const effect = state.effectiveTotal(orig)
+      const adjSum = { p: effect.points - orig.points, e: effect.exp - orig.exp }
       if (!zeroOrig) {
-        const fullyOffsetBefore = adjSum.p === -orig.points && adjSum.e === -orig.exp
         // 超冲：冲正后累计越过原记录的反向全额（如 +50 的账已冲 -20 再冲 -40）
         const overP = orig.points >= 0 ? adjSum.p + dPoints < -orig.points : adjSum.p + dPoints > -orig.points
         const overE = orig.exp >= 0 ? adjSum.e + dExp < -orig.exp : adjSum.e + dExp > -orig.exp
         // 正向防虚增：累计正向更正不得超过原额（补记最多把该记录翻倍；对兑换记录即退款不超过实付）
         const overPosP = adjSum.p + dPoints > Math.abs(orig.points)
         const overPosE = adjSum.e + dExp > Math.abs(orig.exp)
-        if (fullyOffsetBefore || overP || overE)
+        if (overP || overE)
           fail(`记录 ${orig.id} 的累计冲正将越过全额（已冲 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验，本次再冲 ${dPoints >= 0 ? '+' : ''}${dPoints} / ${dExp >= 0 ? '+' : ''}${dExp}）；最大可冲至 ${-orig.points} 分 / ${-orig.exp} 经验`)
         if (overPosP || overPosE)
           fail(`记录 ${orig.id} 的累计正向更正将超过原额（已累计 ${adjSum.p >= 0 ? '+' : ''}${adjSum.p} 分 / ${adjSum.e >= 0 ? '+' : ''}${adjSum.e} 经验，本次再 +${dPoints} / +${dExp}）；正向补记上限为 +${Math.abs(orig.points)} 分 / +${Math.abs(orig.exp)} 经验。确属大额漏记请另记一笔新的 earn`)
       }
-      if (orig.type === 'redeem_voucher') {
-        const consumed = computeConsumed(entries)
-        if (consumed.has(orig.id) && dPoints > 0)
-          fail(`券 ${orig.id} 已被有效核销/回收，冲正原兑换会重复返分。如需撤销消费，请对对应的使用/回收记录做 adjust 冲正`)
+      const root = adjustmentRoot(entries, orig)
+      if (root.type === 'redeem_voucher') {
+        if (state.consumed.has(root.id) && (dPoints !== 0 || dExp !== 0))
+          fail(`券 ${root.id} 已被有效核销/回收，不能再更正兑换金额。如需撤销消费，请先对对应的使用/回收记录做 adjust 冲正`)
       }
       const entry = mkEntry('adjust', String(opts.title ?? `冲正：${orig.title}`), dPoints, dExp, {
         ref: orig.id,
         ...(opts.note ? { note: String(opts.note) } : { note: fullReverse ? `全额冲正 ${orig.id}` : `更正 ${orig.id}` }),
       })
-      writeEntry(dataDir, entry)
+      writeValidatedEntry(dataDir, entries, entry)
       ok(`更正成功（${fullReverse ? '全额冲正' : '差额更正'} ${orig.id}）：积分 ${dPoints >= 0 ? '+' : ''}${dPoints}，经验 ${dExp >= 0 ? '+' : ''}${dExp}`)
     } finally { release() }
     reportSummary(readLedger(dataDir))
@@ -344,19 +371,21 @@ switch (cmd) {
     let price, extra
     if (item.type === 'voucher') {
       price = item.points
-      if (!Number.isFinite(price) || price <= 0) fail(`虚拟券 ${item.name} 的 points 定价非法（${JSON.stringify(item.points)}）：必须是正数；请先修正 shop.json`)
+      if (!Number.isSafeInteger(price) || price <= 0) fail(`虚拟券 ${item.name} 的 points 定价非法（${JSON.stringify(item.points)}）：必须是正安全整数；请先修正 shop.json`)
       extra = { note: `虚拟券兑换，入背包${note ? '；' + note : ''}` }
     } else {
       if (!Number.isFinite(item.yuan) || item.yuan <= 0) fail(`实物 ${item.name} 的 yuan 定价非法（${JSON.stringify(item.yuan)}）：必须是正数；请先修正 shop.json`)
       price = Math.ceil(item.yuan * rate)
+      if (!Number.isSafeInteger(price) || price <= 0) fail(`实物 ${item.name} 的兑换积分超出安全整数范围；请检查 yuan 和汇率`)
       extra = { rate, note: `实物兑换 ¥${item.yuan} × ${rate}${note ? '；' + note : ''}` }
     }
     const release = acquireLock(dataDir)
     try {
-      const balance = summarize(readLedgerStrict(dataDir)).points
+      const entries = readLedgerStrict(dataDir)
+      const balance = summarize(entries).points
       if (balance < price) fail(`余额不足：当前 ${balance} 分，兑换 ${item.name} 需要 ${price} 分（还差 ${price - balance} 分）`)
       const entry = mkEntry(item.type === 'voucher' ? 'redeem_voucher' : 'redeem_physical', item.name, -price, 0, extra)
-      writeEntry(dataDir, entry)
+      writeValidatedEntry(dataDir, entries, entry)
       ok(`兑换成功：${item.name} −${price} 分${item.type === 'voucher' ? '（券已入背包，用 use 核销 / recycle 回收）' : ''}`)
     } finally { release() }
     reportSummary(readLedger(dataDir))
@@ -372,91 +401,26 @@ switch (cmd) {
       const entries = readLedgerStrict(dataDir)
       const orig = ensureVoucherActive(entries, id)
       if (cmd === 'use') {
-        writeEntry(dataDir, mkEntry('use_voucher', `核销：${orig.title}`, 0, 0, { ref: orig.id, ...(opts.note ? { note: String(opts.note) } : {}) }))
+        writeValidatedEntry(dataDir, entries, mkEntry('use_voucher', `核销：${orig.title}`, 0, 0, { ref: orig.id, ...(opts.note ? { note: String(opts.note) } : {}) }))
         ok(`核销成功：${orig.title}（不扣积分）`)
       } else {
-        const back = Math.floor(-orig.points * 0.8)
-        writeEntry(dataDir, mkEntry('recycle_voucher', `回收：${orig.title}`, back, 0, { ref: orig.id, note: `原实付 ${-orig.points} 分 × 80%${opts.note ? '；' + opts.note : ''}` }))
-        ok(`回收成功：${orig.title} +${back} 分（原实付 ${-orig.points} × 80%，不加经验）`)
+        const paid = -voucherState(entries).effectiveTotal(orig).points
+        const back = Math.floor(paid * 0.8)
+        writeValidatedEntry(dataDir, entries, mkEntry('recycle_voucher', `回收：${orig.title}`, back, 0, { ref: orig.id, note: `当前实付 ${paid} 分 × 80%${opts.note ? '；' + opts.note : ''}` }))
+        ok(`回收成功：${orig.title} +${back} 分（当前实付 ${paid} × 80%，不加经验）`)
       }
     } finally { release() }
     reportSummary(readLedger(dataDir))
     break
   }
   case 'doctor': {
-    const problems = []
-    const seen = new Map()
-    const entries = []
-    const ledgerDir = join(dataDir, 'ledger')
-    if (!existsSync(ledgerDir)) { problems.push('缺少 ledger/ 目录') }
-    else {
-      const walk = (dir, rel) => {
-        for (const name of readdirSync(dir)) {
-          const full = join(dir, name)
-          const relName = rel ? `${rel}/${name}` : name
-          if (statSync(full).isDirectory()) { walk(full, relName); continue }
-          if (!name.endsWith('.json') || name.endsWith('.tmp')) continue
-          try {
-            const e = JSON.parse(readFileSync(full, 'utf8'))
-            for (const k of ['id', 'time', 'type', 'title', 'points', 'exp'])
-              if (e[k] === undefined) problems.push(`ledger/${relName} 缺少字段 ${k}`)
-            if (!VALID_TYPES.has(e.type)) problems.push(`ledger/${relName} 未知类型 ${e.type}`)
-            if (!Number.isFinite(e.points) || !Number.isFinite(e.exp)) problems.push(`ledger/${relName} points/exp 不是数字`)
-            if (seen.has(e.id)) problems.push(`重复 id：${e.id}（${seen.get(e.id)} 与 ledger/${relName}）`)
-            seen.set(e.id, `ledger/${relName}`)
-            entries.push(e)
-          } catch (err) { problems.push(`坏文件 ledger/${relName}: ${err.message}`) }
-        }
-      }
-      walk(ledgerDir, '')
-    }
-    // ref 完整性
-    for (const e of entries) {
-      if (e.ref && !seen.has(e.ref)) problems.push(`${e.id}（${e.type}）引用了不存在的 ref：${e.ref}`)
-      if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref) {
-        const orig = entries.find((x) => x.id === e.ref)
-        if (orig && orig.type !== 'redeem_voucher') problems.push(`${e.id} 的 ref ${e.ref} 不是虚拟券兑换（是 ${orig.type}）`)
-      }
-    }
-    // 同一张券被多次「有效」核销/回收（被全额冲正撤销的消费不算）
-    const consumeCount = new Map()
-    for (const e of entries) {
-      if ((e.type === 'use_voucher' || e.type === 'recycle_voucher') && e.ref && !isFullyReversed(entries, e))
-        consumeCount.set(e.ref, (consumeCount.get(e.ref) ?? 0) + 1)
-    }
-    for (const [ref, n] of consumeCount) if (n > 1) problems.push(`券 ${ref} 被核销/回收了 ${n} 次`)
-    // 同一条记录被多次全额冲正
-    const reverseCount = new Map()
-    for (const e of entries) {
-      if (e.type === 'adjust' && e.ref) {
-        const orig = entries.find((x) => x.id === e.ref)
-        if (orig && e.points === -orig.points && e.exp === -orig.exp)
-          reverseCount.set(e.ref, (reverseCount.get(e.ref) ?? 0) + 1)
-      }
-    }
-    for (const [ref, n] of reverseCount) if (n > 1) problems.push(`记录 ${ref} 被全额冲正了 ${n} 次`)
-    // 累计 adjust 超过原记录绝对值（反向 = 超冲，正向 = 虚增）——CLI 写入时已拦截，此处查历史/手工数据
-    const adjTotals = new Map()
-    for (const e of entries) {
-      if (e.type !== 'adjust' || !e.ref) continue
-      const t = adjTotals.get(e.ref) ?? { p: 0, e: 0 }
-      t.p += e.points; t.e += e.exp
-      adjTotals.set(e.ref, t)
-    }
-    for (const [ref, t] of adjTotals) {
-      const orig = entries.find((x) => x.id === ref)
-      if (!orig || (orig.points === 0 && orig.exp === 0)) continue
-      if (Math.abs(t.p) > Math.abs(orig.points) || Math.abs(t.e) > Math.abs(orig.exp))
-        problems.push(`记录 ${ref} 的累计 adjust（${t.p >= 0 ? '+' : ''}${t.p} 分 / ${t.e >= 0 ? '+' : ''}${t.e} 经验）超过原额（±${Math.abs(orig.points)} / ±${Math.abs(orig.exp)}）`)
-    }
-    // 已被「有效」消费的券又被冲正返分（重复返分）——口径同 computeConsumed
-    const consumedActive = computeConsumed(entries)
-    for (const e of entries) {
-      if (e.type !== 'adjust' || !e.ref || e.points <= 0) continue
-      const orig = entries.find((x) => x.id === e.ref)
-      if (orig?.type !== 'redeem_voucher') continue
-      if (consumedActive.has(orig.id)) problems.push(`adjust ${e.id} 对已被有效消费的券 ${orig.id} 返分（重复返分风险）`)
-    }
+    const { entries, bad, invalid } = readLedgerEx(dataDir)
+    const problems = [
+      ...(!existsSync(join(dataDir, 'ledger')) ? ['缺少 ledger/ 目录'] : []),
+      ...bad,
+      ...invalid,
+      ...ledgerErrors(entries),
+    ]
     if (problems.length === 0) {
       ok(`账本自检通过：共 ${entries.length} 条流水，无问题`)
     } else {
