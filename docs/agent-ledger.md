@@ -1,14 +1,16 @@
 # Agent 记账规范（最简对话记账路径）
 
-> 管家侧的 points-ledger skill 只做路由；记账规则以本项目 `docs/schema.md`、本文件及数据目录 `积分规则.md` 的实时内容为准；冲突时以 `docs/schema.md` 为准。
-> 写入走本地 CLI `scripts/ledger.mjs`（summary / list / earn / adjust / redeem / use / recycle / doctor / judge），
-> schema 校验、id 生成、tmp+改名原子写、ref 完整性检查、写锁、冲正防重都在 CLI 内固化，Agent 不直接写 JSON。
+> DSH 中使用 `dsh-points-mall` 插件及其自带的 `points-mall` 技能，旧的 points-ledger skill 已删除。记账规则以本项目 `docs/schema.md`、本文件及数据目录 `积分规则.md` 的实时内容为准；冲突时以 `docs/schema.md` 为准。
+> 优先使用插件的 `points_mall_*` 工具；插件不可用时使用本地 CLI `scripts/ledger.mjs`（summary / list / earn / adjust / redeem / use / recycle / doctor / judge）。
+> 两种入口都负责 schema 校验、id 生成、tmp+改名原子写、ref 完整性检查、写锁与冲正防重，Agent 不直接写流水 JSON。
 
 日常使用 = 跟 Agent 说一句话（「刷了牙」「今天作业很多」），Agent 定档写账并回报。
 
 ## 1. 定位数据目录
 
-按顺序解析，不硬编码绝对路径：
+DSH 中先调用 `points_mall_summary` 检查配置；未配置时引导用户点击侧栏「设置积分账本」，新建或连接已有数据目录。用 `points_mall_rules` 读取当前账本的专项规则、固定事项与商品，用 `points_mall_list` 核对真实流水和引用。
+
+本项目 CLI 按顺序解析，不硬编码绝对路径：
 
 1. 环境变量 `POINTS_DATA_DIR`；
 2. 项目根目录 `config.local.json` 的 `dataDir` 字段（不入 git）；
@@ -31,13 +33,16 @@
 - **专项细则优先**：定分前先查数据目录 `积分规则.md`——有已定细则的事项按细则执行（细则可能拆成多笔，如「出门基础分 + 当日表现加成各记一笔」）；`tasks.json` 是通用示例，与专项细则冲突时以细则为准。
 - **常见重复事项**：`tasks.json` 固定分值直接用（刷牙 5、上课 10…），不做二次判断。
 - **其他事项**：不强制套档位，按实际工作量灵活定分；档位表只作锚点参考；定分只看当场投入，别把已单独记过的大工程量重复算进去。
-- **Jev + 模型共同判断**：主模型初判 + Jev 独立建议（`ledger judge "<描述>" --context "..."`）；相差 ≤50%（以较小者为分母）→ 取平均；相差 >50% → 双方带着对方理由**重新审计**一轮，仍 >50% 则停下问用户。
+- **CLI 路径的 Jev + 模型共同判断**：主模型初判 + Jev 独立建议（`ledger judge "<描述>" --context "..."`）；相差 ≤50%（以较小者为分母）→ 取平均；相差 >50% → 双方带着对方理由**重新审计**一轮，仍 >50% 则停下问用户。
 - Jev 不可用时主模型自行定档，`note` 标注「未经 Jev 复核」。
 - `note` 必写定分理由 / 工作量。
 
+DSH 插件的复核入口为 `points_mall_judge`，接收事项描述和模型拟定分值，返回对该分值的复核建议；它与 CLI 的独立定档输出不同，不能把返回的概率当积分，也不能从中计算双方分值的平均数。Jev 在插件设置中单独启用并配置凭据；未启用或返回 `fallback` 时按上述降级规则处理。
+
 ## 4. 写入规则
 
-- Agent 只调用 `node scripts/ledger.mjs` 写账，不直接创建或修改流水 JSON。CLI 将每笔写入 `<数据目录>/ledger/<YYYY-MM>/<id>.json`，id 形如 `YYYYMMDD-HHmmss-xxxx`，并负责校验、加锁及原子提交。
+- Agent 使用插件写工具或兜底 CLI 写账，不直接创建或修改流水 JSON。每笔写入 `<数据目录>/ledger/<YYYY-MM>/<id>.json`，id 形如 `YYYYMMDD-HHmmss-xxxx`，由写入入口负责校验、加锁及原子提交。
+- 使用插件写工具时，为每次操作提供稳定的 `idempotencyKey`；同一次操作重试复用标识，新操作使用新标识。返回 `duplicate=true` 时说明该操作已记录，不再次奖励。
 - 校验同步：切电脑先等坚果云同步完成再写账（可对比最新流水的 `time` 是否异常陈旧）。
 - 改账不覆盖历史，只追加 `adjust` 记录。
 

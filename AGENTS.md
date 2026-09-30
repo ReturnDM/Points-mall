@@ -5,17 +5,18 @@
 >
 > 管家侧的 points-ledger skill 已于 2026-10-01 删除：记账改由 DSH 插件 `dsh-points-mall` 的
 > points_mall_* 工具接管，流程见插件自带的 points-mall skill；本项目 CLI 降为插件不可用时的兜底。
-> 规则正文始终以本项目与数据目录的实时文件为准，本项目更新后管家侧自动生效，无需同步。
+> 数据 schema 与记账规范以本项目实时文档为准，个人计分细则以当前数据目录为准。
+> 插件通过 `points_mall_rules` 读取当前账本规则；插件自带技能和实现的更新需更新插件。
 
 ## 数据接口
 
-- **数据目录**：环境变量 `POINTS_DATA_DIR` → 项目根 `config.local.json` 的 `dataDir`；都没有就停下让用户配置，不猜路径。真实路径看 `config.local.json`（不入 git）。
+- **数据目录**：DSH 插件通过侧栏「设置积分账本」新建或连接；本项目 CLI 按环境变量 `POINTS_DATA_DIR` → 项目根 `config.local.json` 的 `dataDir` 解析。未配置对应入口时让用户配置，不猜路径；`config.local.json` 不入 git。
 - **规则权威文档**：`docs/schema.md`（数据 schema）与 `docs/agent-ledger.md`（Agent 记账规范），冲突时以 schema.md 为准。
 - **写账前必读**：`tasks.json`（档位与常见事项分值）、`shop.json`（商品）、`积分规则.md`（专项细则）。
 
-## 记账接口：一律走 CLI，不手动写 JSON
+## 记账接口：插件优先，CLI 兜底，不手动写流水 JSON
 
-所有增删查改只调 `node scripts/ledger.mjs`（或 `npm run ledger --`），schema 校验 / id 生成 / 原子写 / ref 完整性已固化在脚本里：
+DSH 中使用插件的 `points_mall_*` 工具；写账前用 `points_mall_rules` 读取规则与商品，用 `points_mall_list` 核对真实流水和引用。插件不可用时只调 `node scripts/ledger.mjs`（或 `npm run ledger --`），schema 校验 / id 生成 / 原子写 / ref 完整性已固化在脚本里：
 
 ```powershell
 node scripts/ledger.mjs summary                                  # 余额/等级/背包
@@ -32,6 +33,7 @@ node scripts/ledger.mjs recycle <redeemId> [--note "..."]        # 回收（返�
 
 - **做事即积分**：不限「生产性」事项，只要真的做了、达成了目标就值得记。判断标准是「有没有做事 / 达成目标」，不是「有没有用」；生活方式类的专项细则（哪些计、怎么计、商城定位）见数据目录 `积分规则.md`。
 - 流水是唯一事实来源，余额 / 经验 / 等级全部由流水汇总，不存总数文件；永不删改历史流水，改账只追加 adjust 记录。
-- 无固定分值事项：主模型与 Jev 各判一次（`node scripts/ledger.mjs judge "<描述>" --context "..."`，key 自动读 `~/.typesafe-api-key`），差 ≤50% 取平均，>50% 带着双方理由重审计一轮，仍分歧则问用户；Jev 不可用则自行定档并在 note 标注「未经 Jev 复核」。定分只看**当场投入**，注意别把已完成并单独记过的大工程量重复算进去。
+- 无固定分值事项：定分只看**当场投入**，注意别把已完成并单独记过的大工程量重复算进去。CLI 路径下主模型与 Jev 各判一次（`node scripts/ledger.mjs judge "<描述>" --context "..."`，key 自动读 `~/.typesafe-api-key`），差 ≤50% 取平均，>50% 带着双方理由重审计一轮，仍分歧则问用户；Jev 不可用则自行定档并在 note 标注「未经 Jev 复核」。
+- DSH 插件的 `points_mall_judge` 复核模型拟定分值，返回建议而非独立定档，按 `docs/agent-ledger.md` 中的插件说明处理；插件 Jev 凭据在 DSH 设置中配置，与 CLI 分开。
 - 每次写账后回报：本次积分/经验变动、当前余额（≈¥，汇率读数据目录 config.json，缺省 20 分 = 1 元）、等级与升级进度（第 N→N+1 级需 `100 + 10×(N−1)` 经验）。
 - **专项计分规则**：数据目录 `积分规则.md`（与 tasks.json/shop.json 同级，随坚果云私有同步）——定分前先查这里有没有已定细则（含商城定位与各专项事项）；新增专项规则也写到这里，不写进本文件。
