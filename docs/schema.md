@@ -7,7 +7,7 @@
 
 ```
 <数据目录>/                     # 坚果云同步目录，如 D:\Nutstore\积分商城数据
-├── config.json                 # 可选：{ "physicalRate": 25 } 实物汇率（积分/元），缺省 20
+├── config.json                 # 可选：{ "physicalRate": 20 } 实物汇率（积分/元），缺省 20
 ├── tasks.json                  # 价目表（档位制）
 ├── shop.json                   # 商城商品
 ├── 积分规则.md                  # 专项计分细则（人写人改；与 tasks.json 冲突时以本文件为准）
